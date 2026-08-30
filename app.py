@@ -16,6 +16,7 @@ Kebutuhan: streamlit yfinance pandas numpy
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 from datetime import datetime
@@ -26,13 +27,19 @@ st.set_page_config(page_title="Regime Screener", layout="centered")
 # UNIVERSE -- basket representatif per sektor (bukan 840 emiten penuh)
 # =====================================================================
 SECTOR_BASKETS = {
-    "Barang Baku": ["TPIA", "INTP", "SMGR", "INKP", "ANTM", "INCO", "MDKA"],
-    "Energi": ["MEDC", "PGAS", "ADRO", "PTBA", "ITMG", "AKRA"],
-    "Perindustrian": ["ASII", "UNTR", "HEXA", "AUTO"],
-    "Keuangan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS"],
-    "Konsumer Siklikal": ["MAPI", "ACES", "LPPF", "ERAA"],
-    "Properti": ["BSDE", "CTRA", "PWON", "SMRA"],
-    "Kesehatan": ["KLBF", "HEAL", "MIKA", "SIDO"],
+    "Barang Baku": ["TPIA", "INTP", "SMGR", "INKP", "ANTM", "INCO", "MDKA",
+                    "TINS", "MBMA", "BRPT", "ESSA"],
+    "Energi": ["MEDC", "PGAS", "ADRO", "PTBA", "ITMG", "AKRA",
+               "HRUM", "INDY", "ELSA", "ADMR"],
+    "Perindustrian": ["ASII", "UNTR", "HEXA", "AUTO",
+                       "PTRO", "ASGR", "DRMA"],
+    "Keuangan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS",
+                 "BJBR", "BJTM", "BNGA", "NISP"],
+    "Konsumer Siklikal": ["MAPI", "ACES", "LPPF", "ERAA",
+                          "MYOR", "MIDI", "MAPA"],
+    "Properti": ["BSDE", "CTRA", "PWON", "SMRA",
+                 "ASRI", "DILD", "APLN"],
+    "Kesehatan": ["KLBF", "HEAL", "MIKA", "SIDO"],  # lapis 2 kesehatan terbatas, belum ditambah
 }
 SEKTOR_FINANSIAL = {"Keuangan"}
 PAPAN_PENGEMBANGAN = {"NCKL", "DOID"}  # placeholder -- perlu update manual berkala
@@ -156,6 +163,44 @@ def ambil_info(ticker):
         return yf.Ticker(f"{ticker}.JK").info
     except Exception:
         return {}
+
+
+# =====================================================================
+# RSS BERITA -- VERSI SEDERHANA (30 Agu 2026)
+# =====================================================================
+# Cuma 1 sumber (Google News RSS, tidak perlu scraping tiap situs media satu-satu)
+# + keyword dasar. Gerbang keras terpisah dari DER/beta/ukuran -- kalau ketemu
+# berita negatif di 5 judul terbaru, saham di-exclude total.
+# Fail-open: kalau RSS gagal diakses (bukan soal Yahoo Finance, ini web biasa),
+# dianggap TIDAK ada berita negatif -- bukan otomatis exclude. Keterbatasan jujur:
+# ini bukan pengecekan konteks/negasi (lihat diskusi RSS Corporate Action sebelumnya),
+# jadi bisa salah tangkap ("rugi tahun lalu, kini untung" tetap kena kata "rugi").
+# Perlu direview manual kalau ada yang ke-exclude gara-gara ini.
+RSS_KEYWORD_NEGATIF = [
+    "gagal bayar", "pailit", "bangkrut", "delisting", "suspend", "korupsi",
+    "gugatan", "kasus dugaan", "penipuan", "skandal", "pkpu", "rugi besar",
+    "turun tajam", "anjlok", "diperiksa", "tersangka",
+]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cek_rss_negatif(ticker):
+    """Mengembalikan (negatif: bool, alasan: str|None)."""
+    import xml.etree.ElementTree as ET
+    try:
+        url = f"https://news.google.com/rss/search?q=saham+{ticker}&hl=id&gl=ID&ceid=ID:id"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        root = ET.fromstring(r.content)
+        for item in root.findall(".//item")[:5]:
+            title_el = item.find("title")
+            title = title_el.text if title_el is not None else ""
+            title_lower = title.lower()
+            for kw in RSS_KEYWORD_NEGATIF:
+                if kw in title_lower:
+                    return True, f'Berita: "{title}"'
+        return False, None
+    except Exception:
+        return False, None
 
 
 # =====================================================================
@@ -320,10 +365,15 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
 
 
 def gerbang_keras(ticker, m, sector_median_dd):
+    """Gerbang keras -- gagal salah satu = tidak lolos ke skor sama sekali.
+    Ambang drawdown DILONGGARKAN (30 Agu 2026, multiplier 2.0 bukan 1.5) -- krisis
+    market-wide bikin banyak saham bagus ikut drawdown dalam karena panic selling,
+    bukan masalah perusahaan sendiri. DER (penalti lunak) & RSS (di bawah) yang
+    jadi penjaga utama kualitas fundamental, bukan drawdown harga semata."""
     alasan = []
     if ticker in PAPAN_PENGEMBANGAN:
         alasan.append("Papan Pengembangan")
-    if sector_median_dd != 0 and m["max_dd"] < sector_median_dd * 1.5:
+    if sector_median_dd != 0 and m["max_dd"] < sector_median_dd * 2.0:
         alasan.append("drawdown historis ekstrem vs median sektor")
     return alasan
 
@@ -490,6 +540,19 @@ def tampilkan_screener():
                              "gate": gate, "penalty": penalty, "m": m})
 
     kandidat.sort(key=lambda c: -c["skor"])
+
+    # Cek RSS negatif -- cuma untuk kandidat yang relevan (tier kuat/menunggu),
+    # bukan seluruh universe, biar tidak lambat. Ketemu -> exclude total (gerbang
+    # keras terpisah dari DER/beta/ukuran).
+    with st.spinner("Cek berita negatif untuk kandidat teratas..."):
+        for c in kandidat:
+            if c["tier"] in ("kuat", "menunggu"):
+                negatif, alasan_rss = cek_rss_negatif(c["ticker"])
+                if negatif:
+                    c["tier"] = "tidak_lolos"
+                    c["gate"] = c["gate"] + [f"RSS negatif: {alasan_rss}"]
+                    c["skor"] = 0.0
+
     eq = bobot_ekuitas(kandidat)
     shown = [c for c in kandidat if c["tier"] in ("kuat", "menunggu")]
 
