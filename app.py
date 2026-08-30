@@ -52,8 +52,17 @@ with col2:
     if st.button("🔄 Refresh data"):
         st.cache_data.clear()
 
-with st.spinner("Menarik data IHSG & universe saham..."):
-    data = load_data()
+try:
+    with st.spinner("Menarik data IHSG & universe saham..."):
+        data = load_data()
+except Exception as e:
+    st.error(
+        "Gagal menarik data dari Yahoo Finance setelah beberapa percobaan. "
+        "Ini biasanya sementara -- Yahoo Finance kadang rate-limit IP server cloud. "
+        "Coba klik 'Refresh data' di atas dalam beberapa menit."
+    )
+    st.caption(f"Detail teknis: {e}")
+    st.stop()
 
 st.caption(f"Diperbarui: {data['generated_at'][:16].replace('T', ' ')}")
 
