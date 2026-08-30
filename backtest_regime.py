@@ -36,12 +36,36 @@ class RegimeEpisode:
     is_ongoing: bool = False            # True kalau episode ini belum selesai (data belum cukup ke depan)
 
 
-def fetch_ihsg(start="2000-01-01") -> pd.Series:
-    """Ambil data close harian IHSG dari Yahoo Finance."""
-    df = yf.download("^JKSE", start=start, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df["Close"].dropna()
+def fetch_ihsg(start="2000-01-01", max_retries=3, retry_delay=3) -> pd.Series:
+    """Ambil data close harian IHSG dari Yahoo Finance, dengan retry.
+
+    Yahoo Finance kadang menolak/rate-limit request dari IP cloud hosting
+    (Streamlit Cloud, AWS, dst) meski jalan normal di komputer lokal --
+    retry dengan jeda biasanya cukup, tapi kalau tetap gagal setelah semua
+    percobaan, ini melempar error yang jelas alih-alih diam-diam
+    mengembalikan data kosong yang bikin error aneh di tempat lain.
+    """
+    import time
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = yf.download("^JKSE", start=start, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close = df["Close"].dropna()
+            if len(close) > 0:
+                return close
+            last_error = "Yahoo Finance mengembalikan data kosong (kemungkinan rate-limit/blokir sementara)."
+        except Exception as e:
+            last_error = str(e)
+        if attempt < max_retries:
+            time.sleep(retry_delay)
+    raise RuntimeError(
+        f"Gagal ambil data IHSG dari Yahoo Finance setelah {max_retries} percobaan. "
+        f"Error terakhir: {last_error}. "
+        "Kemungkinan besar IP server sedang di-rate-limit Yahoo Finance -- coba lagi "
+        "beberapa menit lagi, atau refresh manual."
+    )
 
 
 def find_bear_episodes(close: pd.Series) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
