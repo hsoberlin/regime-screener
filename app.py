@@ -182,25 +182,70 @@ RSS_KEYWORD_NEGATIF = [
     "turun tajam", "anjlok", "diperiksa", "tersangka",
 ]
 
+RSS_SITUS_KREDIBEL = ["kontan.co.id", "bisnis.com", "emitennews.com", "katadata.co.id"]
+
+RSS_KEYWORD_POSITIF = [
+    "laba naik", "laba melonjak", "untung besar", "ekspansi", "akuisisi",
+    "kinerja solid", "rekomendasi beli", "buyback", "dividen jumbo",
+    "kontrak baru", "penghargaan", "pulih", "prospek cerah", "genjot produksi",
+]
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cek_rss_negatif(ticker):
-    """Mengembalikan (negatif: bool, alasan: str|None)."""
+    """Mengembalikan dict berisi berita PALING BARU (apapun sentimennya) + status exclude.
+
+    Selalu kasih tahu update terakhir apa (judul, tanggal, sentimen) -- bukan cuma pas
+    negatif. 5 berita diurutkan ulang berdasarkan tanggal asli (urutan Google News TIDAK
+    selalu kronologis murni), lalu cuma berita PALING BARU yang menentukan status:
+    kalau yang terbaru negatif -> exclude; kalau sudah "ditutup" berita lebih baru yang
+    bersih/positif, tidak exclude lagi -- meski ada berita negatif lebih lama di 5 itu."""
+    import email.utils
+    import urllib.parse
     import xml.etree.ElementTree as ET
+    situs_q = " OR ".join(f"site:{s}" for s in RSS_SITUS_KREDIBEL)
+    q = f"saham {ticker} ({situs_q})"
+    kosong = {"negatif": False, "judul": None, "tanggal": None, "sentimen": None,
+             "n_berita": 0, "gagal": False}
     try:
-        url = f"https://news.google.com/rss/search?q=saham+{ticker}&hl=id&gl=ID&ceid=ID:id"
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=id&gl=ID&ceid=ID:id"
         r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
         root = ET.fromstring(r.content)
+        berita = []
         for item in root.findall(".//item")[:5]:
             title_el = item.find("title")
+            date_el = item.find("pubDate")
             title = title_el.text if title_el is not None else ""
-            title_lower = title.lower()
-            for kw in RSS_KEYWORD_NEGATIF:
-                if kw in title_lower:
-                    return True, f'Berita: "{title}"'
-        return False, None
+            tgl_raw = date_el.text if date_el is not None else None
+            try:
+                tgl = email.utils.parsedate_to_datetime(tgl_raw) if tgl_raw else None
+            except Exception:
+                tgl = None
+            berita.append((title, tgl))
+        if not berita:
+            return kosong
+        berita.sort(key=lambda x: x[1] or pd.Timestamp.min.tz_localize("UTC"), reverse=True)
+        judul_terbaru, tgl_terbaru = berita[0]
+        judul_lower = judul_terbaru.lower()
+        tgl_str = tgl_terbaru.strftime("%d %b %Y") if tgl_terbaru else "tanggal tidak diketahui"
+
+        sentimen = "netral"
+        negatif = False
+        for kw in RSS_KEYWORD_NEGATIF:
+            if kw in judul_lower:
+                sentimen = "negatif"
+                negatif = True
+                break
+        if sentimen == "netral":
+            for kw in RSS_KEYWORD_POSITIF:
+                if kw in judul_lower:
+                    sentimen = "positif"
+                    break
+
+        return {"negatif": negatif, "judul": judul_terbaru, "tanggal": tgl_str,
+               "sentimen": sentimen, "n_berita": len(berita), "gagal": False}
     except Exception:
-        return False, None
+        return {**kosong, "gagal": True}  # fail-open, ditandai jelas "gagal" bukan "aman"
 
 
 # =====================================================================
@@ -544,13 +589,14 @@ def tampilkan_screener():
     # Cek RSS negatif -- cuma untuk kandidat yang relevan (tier kuat/menunggu),
     # bukan seluruh universe, biar tidak lambat. Ketemu -> exclude total (gerbang
     # keras terpisah dari DER/beta/ukuran).
-    with st.spinner("Cek berita negatif untuk kandidat teratas..."):
+    with st.spinner("Cek berita terbaru untuk kandidat teratas..."):
         for c in kandidat:
             if c["tier"] in ("kuat", "menunggu"):
-                negatif, alasan_rss = cek_rss_negatif(c["ticker"])
-                if negatif:
+                rss = cek_rss_negatif(c["ticker"])
+                c["rss"] = rss
+                if rss["negatif"]:
                     c["tier"] = "tidak_lolos"
-                    c["gate"] = c["gate"] + [f"RSS negatif: {alasan_rss}"]
+                    c["gate"] = c["gate"] + [f"RSS negatif ({rss['tanggal']}): {rss['judul']}"]
                     c["skor"] = 0.0
 
     eq = bobot_ekuitas(kandidat)
@@ -572,8 +618,22 @@ def tampilkan_screener():
                       f"Value Rp{m['value_sesi_ini']/1e9:.0f}M")
             if c["penalty"]:
                 st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
+            if c.get("rss", {}).get("gagal"):
+                st.caption("📡 RSS: gagal dicek (koneksi bermasalah, bukan berarti aman)")
+            elif c.get("rss") and c["rss"]["judul"]:
+                emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
+                st.caption(f"📡 Update terakhir ({c['rss']['tanggal']}) {emoji_sentimen} {c['rss']['sentimen']}: {c['rss']['judul']}")
+            elif "rss" in c:
+                st.caption(f"📡 RSS: tidak ada berita ditemukan dari Kontan/Bisnis.com/Emitennews/Katadata")
             if eq["pilihan"] == c["ticker"]:
                 st.line_chart(m["harga_20h"], height=120)
+
+    excluded_rss = [c for c in kandidat if c.get("rss", {}).get("negatif")]
+    if excluded_rss:
+        with st.expander(f"⛔ {len(excluded_rss)} kandidat dibuang karena RSS negatif -- review manual di sini"):
+            for c in excluded_rss:
+                st.write(f"**{c['ticker']}** ({c['rss']['tanggal']})")
+                st.caption(c["rss"]["judul"])
 
     # --- Tahap 4
     st.subheader("Tahap 4 — Bobot Ekuitas")
