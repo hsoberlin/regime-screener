@@ -61,17 +61,30 @@ MODAL_EQUITAS = 20_000_000
 @st.cache_data(ttl=900, show_spinner=False)
 def ambil_ihsg_status():
     """Data 2 tahun terakhir saja -- cukup untuk hitung fase saat ini (rolling 252 hari).
-    Request kecil, meniru pola ambil_makro() Turtle Board yang terbukti jalan."""
+    Request kecil, meniru pola ambil_makro() Turtle Board yang terbukti jalan.
+
+    Mengembalikan (close, error_message) -- error_message None kalau berhasil,
+    supaya kalau gagal, ALASAN SEBENARNYA kelihatan di layar, bukan disembunyikan
+    di balik pesan generik seperti sebelumnya."""
     try:
         df = yf.download(["^JKSE"], period="2y", interval="1d", progress=False,
                          auto_adjust=False, group_by="ticker", threads=True)
+        if df is None or df.empty:
+            return pd.Series(dtype=float), f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
         if isinstance(df.columns, pd.MultiIndex):
+            if "^JKSE" not in df.columns.get_level_values(0):
+                return pd.Series(dtype=float), f"Kolom tidak ada '^JKSE'. Kolom yang ada: {list(df.columns)[:10]}"
             close = df["^JKSE"]["Close"].dropna()
         else:
+            if "Close" not in df.columns:
+                return pd.Series(dtype=float), f"Kolom 'Close' tidak ada. Kolom yang ada: {list(df.columns)}"
             close = df["Close"].dropna()
-        return close
-    except Exception:
-        return pd.Series(dtype=float)
+        if len(close) == 0:
+            return pd.Series(dtype=float), "Kolom Close ada tapi semua nilai NaN/kosong setelah dropna()."
+        return close, None
+    except Exception as e:
+        import traceback
+        return pd.Series(dtype=float), f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
 
 
 # =====================================================================
@@ -364,10 +377,12 @@ if st.button("🔄 Refresh data"):
     st.cache_data.clear()
 
 with st.spinner("Menarik data status IHSG..."):
-    ihsg_close = ambil_ihsg_status()
+    ihsg_close, ihsg_error = ambil_ihsg_status()
 
 if len(ihsg_close) == 0:
-    st.error("Gagal menarik data IHSG dari Yahoo Finance. Coba tekan Refresh data beberapa menit lagi.")
+    st.error("Gagal menarik data IHSG dari Yahoo Finance.")
+    st.code(ihsg_error or "Tidak ada pesan error tercatat.")
+    st.caption("Salin pesan error di atas dan kirim ke saya -- itu penyebab sebenarnya, bukan tebakan.")
     st.stop()
 
 episodes = hitung_episode(ihsg_close)
