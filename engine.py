@@ -32,9 +32,25 @@ DRAWDOWN_GATE_MULTIPLIER = 1.5       # max DD historis > 1.5x median sektor -> g
 MODAL_EQUITAS = 20_000_000           # Rp20 juta, sesuai kesepakatan
 
 
-def fetch_universe_data(tickers, lookback_days=400):
-    raw = yf.download(tickers, period=f"{lookback_days}d", progress=False)
-    return raw
+def fetch_universe_data(tickers, lookback_days=400, max_retries=3, retry_delay=3):
+    """Sama alasannya dengan fetch_ihsg -- retry karena Yahoo Finance kadang
+    rate-limit IP cloud hosting meski jalan normal di lokal."""
+    import time
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            raw = yf.download(tickers, period=f"{lookback_days}d", progress=False)
+            if raw is not None and len(raw) > 0:
+                return raw
+            last_error = "Yahoo Finance mengembalikan data universe kosong."
+        except Exception as e:
+            last_error = str(e)
+        if attempt < max_retries:
+            time.sleep(retry_delay)
+    raise RuntimeError(
+        f"Gagal ambil data universe saham setelah {max_retries} percobaan. "
+        f"Error terakhir: {last_error}. Kemungkinan rate-limit Yahoo Finance -- coba lagi nanti."
+    )
 
 
 def compute_sector_status(ohlcv, sector_baskets, ihsg_trough_date):
