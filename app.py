@@ -149,7 +149,7 @@ def ambil_universe(tickers, periode="500d", batch=80):
             kode = sym[:-3]
             try:
                 sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Close", "Volume"]].dropna()
+                sub = sub[["Open", "Close", "Volume"]].dropna()
                 if len(sub) >= 25:
                     keluar[kode] = sub
             except Exception:
@@ -385,6 +385,7 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
         return None
     df = harga_map[ticker]
     close, volume = df["Close"], df["Volume"]
+    open_ = df["Open"] if "Open" in df.columns else None
     if len(close) < 25:
         return None
     close_after = close[close.index >= trough_date]
@@ -402,9 +403,13 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
     roll_max = close.rolling(min(len(close), 750), min_periods=50).max()
     dd = (close - roll_max) / roll_max * 100
     max_dd = float(dd.min()) if not dd.isna().all() else 0.0
+    # candle hari ini hijau atau merah -- volume besar di candle MERAH itu tanda
+    # distribusi/jual, bukan akumulasi, meski volume ratio-nya tinggi
+    candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
     return {
         "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
         "higher_low": higher_low, "value_sesi_ini": value_sesi_ini, "max_dd": max_dd,
+        "candle_hijau": candle_hijau,
         "harga_20h": close.tail(20).tolist(), "volume_20h": volume.tail(20).tolist(),
     }
 
@@ -464,14 +469,21 @@ def bobot_ekuitas(kandidat):
     hijau = [c for c in kandidat if c["tier"] == "kuat"]
     if not hijau:
         return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
-    # Gerbang eksekusi: HANYA volume ratio (momentum riil, relatif ke kebiasaan saham itu
-    # sendiri). Value tetap ditampilkan di kartu sebagai konteks likuiditas/"lirikan trader",
-    # tapi tidak lagi jadi syarat lolos -- keputusan value cukup/tidak diserahkan ke penilaian
-    # user sendiri saat lihat kartunya, bukan aturan keras.
-    lolos = [c for c in hijau if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO]
+    # Gerbang eksekusi: volume ratio (momentum riil) DAN candle hari ini harus hijau
+    # (harga > open) -- volume besar di candle merah itu tanda distribusi/jual, bukan
+    # akumulasi, meski volume ratio-nya tinggi. Value tetap ditampilkan di kartu sebagai
+    # konteks likuiditas/"lirikan trader", tapi bukan syarat lolos.
+    lolos = [c for c in hijau
+             if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+             and c["m"]["candle_hijau"] is True]
     if not lolos:
-        return {"status": "cash_ditahan",
-               "detail": f"{len(hijau)} kandidat Tier hijau, belum ada yang volume-nya >= {PARTICIPATION_VOL_RATIO:.0f}x rata-rata 20 hari.",
+        vol_saja = [c["ticker"] for c in hijau
+                   if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+                   and c["m"]["candle_hijau"] is False]
+        detail = f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos (volume>={PARTICIPATION_VOL_RATIO:.0f}x DAN candle hijau)."
+        if vol_saja:
+            detail += f" {len(vol_saja)} sempat volume tinggi tapi candle merah ({', '.join(vol_saja)}) -- tidak dihitung, indikasi distribusi bukan akumulasi."
+        return {"status": "cash_ditahan", "detail": detail,
                "pilihan": None, "menunggu": [c["ticker"] for c in hijau]}
     if len(lolos) == 1:
         pilihan, alasan = lolos[0], "satu-satunya kandidat lolos eksekusi"
@@ -600,11 +612,10 @@ def tampilkan_screener():
                     c["skor"] = 0.0
 
     eq = bobot_ekuitas(kandidat)
-    shown = [c for c in kandidat if c["tier"] in ("kuat", "menunggu")]
+    shown_kuat = [c for c in kandidat if c["tier"] == "kuat"]
+    shown_menunggu = [c for c in kandidat if c["tier"] == "menunggu"]
 
-    if not shown:
-        st.info("Tidak ada kandidat lolos gerbang saat ini.")
-    for c in shown:
+    def render_kartu(c):
         if eq["pilihan"] == c["ticker"]:
             badge = "🟢 All-in Rp20jt"
         elif c["ticker"] in eq.get("menunggu", []):
@@ -614,8 +625,9 @@ def tampilkan_screener():
         with st.container(border=True):
             st.write(f"**{c['ticker']}** — {badge}")
             m = c["m"]
+            candle_txt = {True: "🟩 candle hijau", False: "🟥 candle merah", None: "candle ?"}[m["candle_hijau"]]
             st.caption(f"{c['sektor']} · Gap vs sektor {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                      f"Value Rp{m['value_sesi_ini']/1e9:.0f}M")
+                      f"{candle_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
             if c["penalty"]:
                 st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
             if c.get("rss", {}).get("gagal"):
@@ -624,9 +636,22 @@ def tampilkan_screener():
                 emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
                 st.caption(f"📡 Update terakhir ({c['rss']['tanggal']}) {emoji_sentimen} {c['rss']['sentimen']}: {c['rss']['judul']}")
             elif "rss" in c:
-                st.caption(f"📡 RSS: tidak ada berita ditemukan dari Kontan/Bisnis.com/Emitennews/Katadata")
+                st.caption("📡 RSS: tidak ada berita ditemukan dari Kontan/Bisnis.com/Emitennews/Katadata")
             if eq["pilihan"] == c["ticker"]:
                 st.line_chart(m["harga_20h"], height=120)
+
+    if not shown_kuat and not shown_menunggu:
+        st.info("Tidak ada kandidat lolos gerbang saat ini.")
+
+    if shown_kuat:
+        st.caption(f"Tier kuat · {len(shown_kuat)} kandidat")
+        for c in shown_kuat:
+            render_kartu(c)
+
+    if shown_menunggu:
+        with st.expander(f"Tier menunggu konfirmasi · {len(shown_menunggu)} saham (belum ada sinyal partisipasi)"):
+            for c in shown_menunggu:
+                render_kartu(c)
 
     excluded_rss = [c for c in kandidat if c.get("rss", {}).get("negatif")]
     if excluded_rss:
