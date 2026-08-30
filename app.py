@@ -16,6 +16,7 @@ Kebutuhan: streamlit yfinance pandas numpy
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
@@ -525,6 +526,59 @@ def skor_dan_tier(m, gate, penalty):
 
 
 # =====================================================================
+# RADAR 5 DIMENSI (langkah awal, terinspirasi Snowflake Analysis)
+# =====================================================================
+RADAR_LABEL = ["Gap sektor", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
+
+
+def hitung_dimensi_radar(c):
+    """5 skor 0-100 per kandidat: Gap sektor, Partisipasi, Kualitas (fundamental),
+    Sentimen (RSS), Eksekusi (volume+candle+lari hari ini). Skala kasar, untuk
+    perbandingan visual antar kandidat -- bukan skor presisi."""
+    m = c["m"]
+
+    gap_dim = max(0, min(100, -m["gap"] * 3))  # -33% gap = 100
+
+    part_dim = (50 if m["vol_ratio_5h"] > 1.0 else 0) + (50 if m["higher_low"] else 0)
+
+    kualitas_dim = 100 - len(c.get("penalty", [])) * 33
+    kualitas_dim = max(0, kualitas_dim)
+
+    rss = c.get("rss")
+    if rss and rss.get("sentimen") == "positif":
+        sentimen_dim = 100
+    elif rss and rss.get("sentimen") == "negatif":
+        sentimen_dim = 0
+    elif rss and rss.get("sentimen") == "netral":
+        sentimen_dim = 50
+    else:
+        sentimen_dim = 50  # belum dicek / tidak ada data -- netral, bukan 0
+
+    eksekusi_dim = min(60, m["vol_ratio_today"] / PARTICIPATION_VOL_RATIO * 60)
+    if m.get("candle_hijau") is True:
+        eksekusi_dim += 20
+    if m.get("lari_hari_ini") is not None and m["lari_hari_ini"] <= LARI_HARI_INI_MAKS:
+        eksekusi_dim += 20
+    eksekusi_dim = max(0, min(100, eksekusi_dim))
+
+    return {"Gap sektor": round(gap_dim), "Partisipasi": round(part_dim),
+           "Kualitas": round(kualitas_dim), "Sentimen": round(sentimen_dim),
+           "Eksekusi": round(eksekusi_dim)}
+
+
+def render_radar(dimensi, judul):
+    nilai = [dimensi[l] for l in RADAR_LABEL] + [dimensi[RADAR_LABEL[0]]]
+    label = RADAR_LABEL + [RADAR_LABEL[0]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=nilai, theta=label, fill="toself", name=judul))
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=9))),
+        showlegend=False, height=260, margin=dict(l=30, r=30, t=20, b=20),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"radar_{judul}")
+
+
+# =====================================================================
 # TAHAP 4 -- BOBOT EKUITAS
 # =====================================================================
 def bobot_ekuitas(kandidat):
@@ -729,6 +783,9 @@ def tampilkan_screener():
                 st.caption("📡 RSS: tidak ada berita ditemukan dari Kontan/Bisnis.com/Emitennews/Katadata")
             if eq["pilihan"] == c["ticker"]:
                 st.line_chart(m["harga_20h"], height=120)
+            if c["tier"] == "kuat":
+                with st.expander("Radar 5 dimensi"):
+                    render_radar(hitung_dimensi_radar(c), c["ticker"])
 
     if not shown_kuat and not shown_menunggu:
         st.info("Tidak ada kandidat lolos gerbang saat ini.")
