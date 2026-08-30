@@ -399,10 +399,13 @@ with st.spinner("Menarik harga IHSG hari ini..."):
     harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
 
 if harga_now is None:
-    st.error("Gagal menarik harga IHSG dari Yahoo Finance.")
-    st.code(ihsg_error or "Tidak ada pesan error tercatat.")
-    st.caption("Salin pesan error di atas dan kirim ke saya -- itu penyebab sebenarnya, bukan tebakan.")
-    st.stop()
+    st.warning("Gagal menarik harga IHSG otomatis dari Yahoo Finance. Masukkan manual dulu supaya tetap bisa dipakai:")
+    with st.expander("Detail error (opsional, buat didiagnosis nanti)"):
+        st.code(ihsg_error or "Tidak ada pesan error tercatat.")
+    harga_now = st.number_input("Harga IHSG hari ini", min_value=0.0, value=6500.0, step=0.01)
+    tanggal_now = pd.Timestamp.now().normalize()
+    if harga_now <= 0:
+        st.stop()
 
 ihsg = status_ihsg_ringan(harga_now, tanggal_now)
 backtest = BACKTEST_HISTORIS
@@ -436,7 +439,8 @@ with st.spinner("Menarik data saham universe..."):
     harga_map = ambil_universe(tuple(ALL_TICKERS))
 
 if not harga_map:
-    st.error("Gagal menarik data saham dari Yahoo Finance. Coba tekan Refresh data beberapa menit lagi.")
+    st.warning("Gagal menarik data saham (Tahap 2-4) dari Yahoo Finance saat ini. "
+              "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
     st.stop()
 
 # --- Tahap 2
