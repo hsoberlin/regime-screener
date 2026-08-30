@@ -369,11 +369,14 @@ def bobot_ekuitas(kandidat):
     hijau = [c for c in kandidat if c["tier"] == "kuat"]
     if not hijau:
         return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
-    lolos = [c for c in hijau if c["m"]["value_sesi_ini"] >= PARTICIPATION_VALUE_IDR
-             or c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO]
+    # Gerbang eksekusi: HANYA volume ratio (momentum riil, relatif ke kebiasaan saham itu
+    # sendiri). Value tetap ditampilkan di kartu sebagai konteks likuiditas/"lirikan trader",
+    # tapi tidak lagi jadi syarat lolos -- keputusan value cukup/tidak diserahkan ke penilaian
+    # user sendiri saat lihat kartunya, bukan aturan keras.
+    lolos = [c for c in hijau if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO]
     if not lolos:
         return {"status": "cash_ditahan",
-               "detail": f"{len(hijau)} kandidat Tier hijau, belum lolos ambang eksekusi (Value>=Rp100M atau Vol>=4x).",
+               "detail": f"{len(hijau)} kandidat Tier hijau, belum ada yang volume-nya >= {PARTICIPATION_VOL_RATIO:.0f}x rata-rata 20 hari.",
                "pilihan": None, "menunggu": [c["ticker"] for c in hijau]}
     if len(lolos) == 1:
         pilihan, alasan = lolos[0], "satu-satunya kandidat lolos eksekusi"
@@ -395,125 +398,129 @@ st.title("Regime Screener")
 if st.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-with st.spinner("Menarik harga IHSG hari ini..."):
-    harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
+@st.fragment(run_every="15m")
+def tampilkan_screener():
+    with st.spinner("Menarik harga IHSG hari ini..."):
+        harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
 
-if harga_now is None:
-    st.warning("Gagal menarik harga IHSG otomatis dari Yahoo Finance. Masukkan manual dulu supaya tetap bisa dipakai:")
-    with st.expander("Detail error (opsional, buat didiagnosis nanti)"):
-        st.code(ihsg_error or "Tidak ada pesan error tercatat.")
-    harga_now = st.number_input("Harga IHSG hari ini", min_value=0.0, value=6500.0, step=0.01)
-    tanggal_now = pd.Timestamp.now().normalize()
-    if harga_now <= 0:
+    if harga_now is None:
+        st.warning("Gagal menarik harga IHSG otomatis dari Yahoo Finance. Masukkan manual dulu supaya tetap bisa dipakai:")
+        with st.expander("Detail error (opsional, buat didiagnosis nanti)"):
+            st.code(ihsg_error or "Tidak ada pesan error tercatat.")
+        harga_now = st.number_input("Harga IHSG hari ini", min_value=0.0, value=6500.0, step=0.01)
+        tanggal_now = pd.Timestamp.now().normalize()
+        if harga_now <= 0:
+            st.stop()
+
+    ihsg = status_ihsg_ringan(harga_now, tanggal_now)
+    backtest = BACKTEST_HISTORIS
+
+    # --- Tahap 1
+    st.subheader("Tahap 1 — Status IHSG")
+    light, note = traffic_light(ihsg["fase"], backtest)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Fase", f"{light} {ihsg['fase']}")
+    c2.metric("Harga IHSG", f"{ihsg['harga']:.0f}")
+    if ihsg["pct_dari_trough"] is not None:
+        c3.metric("Dari bottom", f"{ihsg['pct_dari_trough']:+.1f}%")
+    st.caption(note)
+
+    with st.expander("Backtest probabilitas historis (7 episode sejak 2000)"):
+        st.dataframe(
+            [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
+              "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
+              "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
+            hide_index=True, width="stretch",
+        )
+        st.caption("Data statis, dihitung dari histori Yahoo Finance per 30 Agustus 2026 -- "
+                  "bukan ditarik ulang tiap app dibuka, karena episode-episode ini sudah selesai.")
+
+    if ihsg["fase"] == "NORMAL" or ihsg["trough_date"] is None:
+        st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
         st.stop()
 
-ihsg = status_ihsg_ringan(harga_now, tanggal_now)
-backtest = BACKTEST_HISTORIS
+    # --- ambil data universe (cuma kalau IHSG lagi ada siklus)
+    with st.spinner("Menarik data saham universe..."):
+        harga_map = ambil_universe(tuple(ALL_TICKERS))
 
-# --- Tahap 1
-st.subheader("Tahap 1 — Status IHSG")
-light, note = traffic_light(ihsg["fase"], backtest)
-c1, c2, c3 = st.columns(3)
-c1.metric("Fase", f"{light} {ihsg['fase']}")
-c2.metric("Harga IHSG", f"{ihsg['harga']:.0f}")
-if ihsg["pct_dari_trough"] is not None:
-    c3.metric("Dari bottom", f"{ihsg['pct_dari_trough']:+.1f}%")
-st.caption(note)
+    if not harga_map:
+        st.warning("Gagal menarik data saham (Tahap 2-4) dari Yahoo Finance saat ini. "
+                  "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
+        st.stop()
 
-with st.expander("Backtest probabilitas historis (7 episode sejak 2000)"):
-    st.dataframe(
-        [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
-          "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
-          "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
-        hide_index=True, width="stretch",
-    )
-    st.caption("Data statis, dihitung dari histori Yahoo Finance per 30 Agustus 2026 -- "
-              "bukan ditarik ulang tiap app dibuka, karena episode-episode ini sudah selesai.")
+    # --- Tahap 2
+    st.subheader("Tahap 2 — Status Sektor")
+    st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
+              f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
+              f"tapi pola tiap siklus bisa beda, cek ranking live di bawah.")
+    sektor = status_sektor(harga_map, ihsg["trough_date"])
+    for s in sektor:
+        status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
+        st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
 
-if ihsg["fase"] == "NORMAL" or ihsg["trough_date"] is None:
-    st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
-    st.stop()
+    sector_return_map = {s["sektor"]: s["return"] for s in sektor}
 
-# --- ambil data universe (cuma kalau IHSG lagi ada siklus)
-with st.spinner("Menarik data saham universe..."):
-    harga_map = ambil_universe(tuple(ALL_TICKERS))
-
-if not harga_map:
-    st.warning("Gagal menarik data saham (Tahap 2-4) dari Yahoo Finance saat ini. "
-              "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
-    st.stop()
-
-# --- Tahap 2
-st.subheader("Tahap 2 — Status Sektor")
-st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
-          f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
-          f"tapi pola tiap siklus bisa beda, cek ranking live di bawah.")
-sektor = status_sektor(harga_map, ihsg["trough_date"])
-for s in sektor:
-    status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
-    st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
-
-sector_return_map = {s["sektor"]: s["return"] for s in sektor}
-
-# --- Tahap 3
-st.subheader("Tahap 3 — Kandidat Emiten")
-kandidat = []
-for sektor_nama, tickers in SECTOR_BASKETS.items():
-    sector_avg = sector_return_map.get(sektor_nama, 0)
-    if sector_avg <= 0:
-        continue
-    dd_values, der_values, market_caps, infos, metrics_map = [], [], {}, {}, {}
-    for t in tickers:
-        m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
-        if m is None:
+    # --- Tahap 3
+    st.subheader("Tahap 3 — Kandidat Emiten")
+    kandidat = []
+    for sektor_nama, tickers in SECTOR_BASKETS.items():
+        sector_avg = sector_return_map.get(sektor_nama, 0)
+        if sector_avg <= 0:
             continue
-        metrics_map[t] = m
-        dd_values.append(m["max_dd"])
-        info = ambil_info(t)
-        infos[t] = info
-        if info.get("marketCap"):
-            market_caps[t] = info["marketCap"]
-        if sektor_nama not in SEKTOR_FINANSIAL and info.get("debtToEquity"):
-            der_values.append(info["debtToEquity"])
-    sector_median_dd = float(np.median(dd_values)) if dd_values else 0
-    sector_der_median = float(np.median(der_values)) if der_values else None
-    for t, m in metrics_map.items():
-        gate = gerbang_keras(t, m, sector_median_dd)
-        penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(t, infos.get(t, {}), sector_der_median, market_caps)
-        skor, tier = skor_dan_tier(m, gate, penalty)
-        kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
-                         "gate": gate, "penalty": penalty, "m": m})
+        dd_values, der_values, market_caps, infos, metrics_map = [], [], {}, {}, {}
+        for t in tickers:
+            m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
+            if m is None:
+                continue
+            metrics_map[t] = m
+            dd_values.append(m["max_dd"])
+            info = ambil_info(t)
+            infos[t] = info
+            if info.get("marketCap"):
+                market_caps[t] = info["marketCap"]
+            if sektor_nama not in SEKTOR_FINANSIAL and info.get("debtToEquity"):
+                der_values.append(info["debtToEquity"])
+        sector_median_dd = float(np.median(dd_values)) if dd_values else 0
+        sector_der_median = float(np.median(der_values)) if der_values else None
+        for t, m in metrics_map.items():
+            gate = gerbang_keras(t, m, sector_median_dd)
+            penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(t, infos.get(t, {}), sector_der_median, market_caps)
+            skor, tier = skor_dan_tier(m, gate, penalty)
+            kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
+                             "gate": gate, "penalty": penalty, "m": m})
 
-kandidat.sort(key=lambda c: -c["skor"])
-eq = bobot_ekuitas(kandidat)
-shown = [c for c in kandidat if c["tier"] in ("kuat", "menunggu")]
+    kandidat.sort(key=lambda c: -c["skor"])
+    eq = bobot_ekuitas(kandidat)
+    shown = [c for c in kandidat if c["tier"] in ("kuat", "menunggu")]
 
-if not shown:
-    st.info("Tidak ada kandidat lolos gerbang saat ini.")
-for c in shown:
-    if eq["pilihan"] == c["ticker"]:
-        badge = "🟢 All-in Rp20jt"
-    elif c["ticker"] in eq.get("menunggu", []):
-        badge = "🟡 Cash ditahan"
-    else:
-        badge = {"kuat": "Kandidat kuat", "menunggu": "Menunggu konfirmasi"}.get(c["tier"], c["tier"])
-    with st.container(border=True):
-        st.write(f"**{c['ticker']}** — {badge}")
-        m = c["m"]
-        st.caption(f"{c['sektor']} · Gap vs sektor {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                  f"Value Rp{m['value_sesi_ini']/1e9:.0f}M")
-        if c["penalty"]:
-            st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
+    if not shown:
+        st.info("Tidak ada kandidat lolos gerbang saat ini.")
+    for c in shown:
         if eq["pilihan"] == c["ticker"]:
-            st.line_chart(m["harga_20h"], height=120)
+            badge = "🟢 All-in Rp20jt"
+        elif c["ticker"] in eq.get("menunggu", []):
+            badge = "🟡 Cash ditahan"
+        else:
+            badge = {"kuat": "Kandidat kuat", "menunggu": "Menunggu konfirmasi"}.get(c["tier"], c["tier"])
+        with st.container(border=True):
+            st.write(f"**{c['ticker']}** — {badge}")
+            m = c["m"]
+            st.caption(f"{c['sektor']} · Gap vs sektor {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
+                      f"Value Rp{m['value_sesi_ini']/1e9:.0f}M")
+            if c["penalty"]:
+                st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
+            if eq["pilihan"] == c["ticker"]:
+                st.line_chart(m["harga_20h"], height=120)
 
-# --- Tahap 4
-st.subheader("Tahap 4 — Bobot Ekuitas")
-status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
-st.write(f"{status_icon.get(eq['status'], '')} **{eq['status'].replace('_', ' ').title()}**")
-st.caption(eq["detail"])
+    # --- Tahap 4
+    st.subheader("Tahap 4 — Bobot Ekuitas")
+    status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
+    st.write(f"{status_icon.get(eq['status'], '')} **{eq['status'].replace('_', ' ').title()}**")
+    st.caption(eq["detail"])
 
-st.divider()
-st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
-          "Universe saat ini: basket representatif per sektor (belum universe 840 emiten penuh). "
-          "Data historis, bukan sinyal beli/jual. Bukan nasihat keuangan.")
+    st.divider()
+    st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
+              "Universe saat ini: basket representatif per sektor (belum universe 840 emiten penuh). "
+              "Data historis, bukan sinyal beli/jual. Bukan nasihat keuangan.")
+
+tampilkan_screener()
