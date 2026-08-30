@@ -110,6 +110,48 @@ def ambil_harga_ihsg_now():
         return None, None, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
 
 
+# =====================================================================
+# BETA MANUAL VS IHSG (30 Agu 2026)
+# =====================================================================
+# yfinance .info['beta'] TERBUKTI TIDAK BISA DIPERCAYA untuk saham IDX --
+# cross-check manual (SMGR: yfinance 0.08 vs hitung manual 0.92, PGAS: yfinance
+# 0.09 vs manual 0.69) menunjukkan yfinance kemungkinan menghitung terhadap
+# index yang salah (bukan IHSG). Beta di sistem ini SEKARANG dihitung sendiri:
+# kovarian return harian saham vs return harian IHSG, dibagi varian IHSG,
+# pakai 1 tahun data -- bukan lagi ambil dari info dict yfinance.
+@st.cache_data(ttl=1800, show_spinner=False)
+def ambil_ihsg_untuk_beta():
+    """IHSG ~1 tahun terakhir, cuma untuk hitung beta -- request bareng ticker
+    lain (bukan sendirian), pola yang sama terbukti jalan di ambil_harga_ihsg_now."""
+    try:
+        df = yf.download(["^JKSE", "IDR=X", "^IXIC"], period="1y", interval="1d",
+                         progress=False, auto_adjust=False, group_by="ticker", threads=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            close = df["^JKSE"]["Close"].dropna()
+        else:
+            close = df["Close"].dropna()
+        return close
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def hitung_beta(close_saham, close_ihsg):
+    """Beta = kovarian(return saham, return IHSG) / varian(return IHSG)."""
+    try:
+        ret_saham = close_saham.pct_change().dropna()
+        ret_ihsg = close_ihsg.pct_change().dropna()
+        gabung = pd.concat([ret_saham, ret_ihsg], axis=1, join="inner").dropna()
+        if len(gabung) < 60:  # kurang dari ~3 bulan data overlap, jangan dipercaya
+            return None
+        gabung.columns = ["saham", "ihsg"]
+        var_ihsg = gabung["ihsg"].var()
+        if var_ihsg == 0:
+            return None
+        return float(gabung["saham"].cov(gabung["ihsg"]) / var_ihsg)
+    except Exception:
+        return None
+
+
 def status_ihsg_ringan(harga_now, tanggal):
     drawdown_52w = (harga_now - PUNCAK_2026) / PUNCAK_2026 * 100
     pct_dari_trough = (harga_now - TROUGH_2026_HARGA) / TROUGH_2026_HARGA * 100
@@ -443,14 +485,14 @@ def gerbang_keras(ticker, m, sector_median_dd):
     return alasan
 
 
-def penalti_berat_naik(ticker, info, sector_der_median, market_caps):
+def penalti_berat_naik(ticker, info, sector_der_median, market_caps, beta_manual):
     alasan = []
-    der, beta, mcap = info.get("debtToEquity"), info.get("beta"), info.get("marketCap")
+    der, mcap = info.get("debtToEquity"), info.get("marketCap")
     if der is not None and sector_der_median:
         if der > sector_der_median * BERAT_NAIK_DER_MULTIPLIER:
             alasan.append(f"DER {der:.0f} tinggi")
-    if beta is not None and abs(beta) < BERAT_NAIK_BETA_THRESHOLD:
-        alasan.append(f"beta {beta:.2f} mendekati nol")
+    if beta_manual is not None and abs(beta_manual) < BERAT_NAIK_BETA_THRESHOLD:
+        alasan.append(f"beta {beta_manual:.2f} mendekati nol (dihitung manual vs IHSG)")
     if mcap is not None and market_caps:
         top_n = {t for t, _ in sorted(market_caps.items(), key=lambda x: -x[1])[:BERAT_NAIK_TOP_N_MCAP]}
         if ticker in top_n:
@@ -602,6 +644,8 @@ def tampilkan_screener():
         status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
         st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
 
+    ihsg_beta_series = ambil_ihsg_untuk_beta()
+
     sector_return_map = {s["sektor"]: s["return"] for s in sektor}
 
     # --- Tahap 3
@@ -611,7 +655,7 @@ def tampilkan_screener():
         sector_avg = sector_return_map.get(sektor_nama, 0)
         if sector_avg <= 0:
             continue
-        dd_values, der_values, market_caps, infos, metrics_map = [], [], {}, {}, {}
+        dd_values, der_values, market_caps, infos, metrics_map, betas = [], [], {}, {}, {}, {}
         for t in tickers:
             m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
             if m is None:
@@ -624,11 +668,14 @@ def tampilkan_screener():
                 market_caps[t] = info["marketCap"]
             if sektor_nama not in SEKTOR_FINANSIAL and info.get("debtToEquity"):
                 der_values.append(info["debtToEquity"])
+            if t in harga_map and len(ihsg_beta_series) > 0:
+                betas[t] = hitung_beta(harga_map[t]["Close"], ihsg_beta_series)
         sector_median_dd = float(np.median(dd_values)) if dd_values else 0
         sector_der_median = float(np.median(der_values)) if der_values else None
         for t, m in metrics_map.items():
             gate = gerbang_keras(t, m, sector_median_dd)
-            penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(t, infos.get(t, {}), sector_der_median, market_caps)
+            penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(
+                t, infos.get(t, {}), sector_der_median, market_caps, betas.get(t))
             skor, tier = skor_dan_tier(m, gate, penalty)
             kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
                              "gate": gate, "penalty": penalty, "m": m})
