@@ -60,6 +60,16 @@ PARTICIPATION_VOL_RATIO = 4.0
 PARTICIPATION_VALUE_IDR = 100_000_000_000
 MODAL_EQUITAS = 20_000_000
 
+# --- Manajemen risiko posisi (30 Agu 2026, respons review Claude Project lain) ---
+LARI_HARI_INI_MAKS = 0.05      # skip kandidat kalau harga sudah lari >5% dari open hari itu
+                                 # (mirip konsep LARI SEJAK Turtle Board, versi data harian)
+SL_KERAS_PCT = -0.10           # SL keras dari harga entry, aktif SEJAK HARI PERTAMA -- ini
+                                 # yang menutup "zona tanpa perlindungan" sebelum trailing-lock
+                                 # aktif (trailing baru mulai di gain >=10%, jadi ada jendela
+                                 # rugi -0% s/d -SL_KERAS_PCT yang sebelumnya tidak terjaga sama sekali)
+TRAILING_AKTIF_GAIN = 0.10     # trailing-lock baru aktif setelah gain >= ini
+TRAILING_LOCK_PCT = 0.75       # trailing-lock mengunci 75% dari gain puncak
+
 # =====================================================================
 # PENGAMBILAN DATA -- pola sama seperti Turtle Board: polos, batching,
 # cache_data, gagal-lanjut (bukan retry-loop dengan session custom yang
@@ -406,10 +416,15 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
     # candle hari ini hijau atau merah -- volume besar di candle MERAH itu tanda
     # distribusi/jual, bukan akumulasi, meski volume ratio-nya tinggi
     candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
+    # seberapa jauh harga sudah lari dari open HARI INI -- proxy harian untuk konsep
+    # LARI SEJAK Turtle Board (kita tidak punya data intraday, jadi ini bukan "sejak
+    # sinyal muncul", tapi "sejak open hari ini" -- kalau sudah lari jauh, risiko beli
+    # di puncak harian lebih besar)
+    lari_hari_ini = float((close.iloc[-1] - open_.iloc[-1]) / open_.iloc[-1]) if open_ is not None and open_.iloc[-1] > 0 else None
     return {
         "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
         "higher_low": higher_low, "value_sesi_ini": value_sesi_ini, "max_dd": max_dd,
-        "candle_hijau": candle_hijau,
+        "candle_hijau": candle_hijau, "lari_hari_ini": lari_hari_ini,
         "harga_20h": close.tail(20).tolist(), "volume_20h": volume.tail(20).tolist(),
     }
 
@@ -475,14 +490,23 @@ def bobot_ekuitas(kandidat):
     # konteks likuiditas/"lirikan trader", tapi bukan syarat lolos.
     lolos = [c for c in hijau
              if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
-             and c["m"]["candle_hijau"] is True]
+             and c["m"]["candle_hijau"] is True
+             and (c["m"]["lari_hari_ini"] is None or c["m"]["lari_hari_ini"] <= LARI_HARI_INI_MAKS)]
     if not lolos:
         vol_saja = [c["ticker"] for c in hijau
                    if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
                    and c["m"]["candle_hijau"] is False]
-        detail = f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos (volume>={PARTICIPATION_VOL_RATIO:.0f}x DAN candle hijau)."
+        sudah_lari = [c["ticker"] for c in hijau
+                     if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+                     and c["m"]["candle_hijau"] is True
+                     and c["m"]["lari_hari_ini"] is not None
+                     and c["m"]["lari_hari_ini"] > LARI_HARI_INI_MAKS]
+        detail = (f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos "
+                 f"(volume>={PARTICIPATION_VOL_RATIO:.0f}x DAN candle hijau DAN lari hari ini <={LARI_HARI_INI_MAKS*100:.0f}%).")
         if vol_saja:
-            detail += f" {len(vol_saja)} sempat volume tinggi tapi candle merah ({', '.join(vol_saja)}) -- tidak dihitung, indikasi distribusi bukan akumulasi."
+            detail += f" {len(vol_saja)} sempat volume tinggi tapi candle merah ({', '.join(vol_saja)}) -- indikasi distribusi bukan akumulasi."
+        if sudah_lari:
+            detail += f" {len(sudah_lari)} sudah lari >{LARI_HARI_INI_MAKS*100:.0f}% hari ini ({', '.join(sudah_lari)}) -- risiko beli di puncak harian."
         return {"status": "cash_ditahan", "detail": detail,
                "pilihan": None, "menunggu": [c["ticker"] for c in hijau]}
     if len(lolos) == 1:
@@ -501,6 +525,19 @@ def bobot_ekuitas(kandidat):
 # HALAMAN
 # =====================================================================
 st.title("Regime Screener")
+
+st.sidebar.markdown("### Posisi aktif (opsional)")
+st.sidebar.caption("Isi setelah eksekusi beli, supaya sistem bisa hitung SL/trailing-lock/override regime tiap dibuka.")
+posisi_aktif = st.sidebar.checkbox("Ada posisi aktif")
+posisi = None
+if posisi_aktif:
+    p_ticker = st.sidebar.text_input("Ticker (tanpa .JK)", value="").strip().upper()
+    p_harga_beli = st.sidebar.number_input("Harga beli", min_value=0.0, value=0.0, step=1.0)
+    p_tanggal_beli = st.sidebar.date_input("Tanggal beli")
+    if p_ticker and p_harga_beli > 0:
+        posisi = {"ticker": p_ticker, "harga_beli": p_harga_beli,
+                 "tanggal_beli": pd.Timestamp(p_tanggal_beli)}
+    st.sidebar.caption("Catatan: input ini TIDAK tersimpan permanen -- hilang kalau app di-reboot atau tab ditutup. Isi ulang tiap sesi.")
 
 if st.button("🔄 Refresh data"):
     st.cache_data.clear()
@@ -626,8 +663,9 @@ def tampilkan_screener():
             st.write(f"**{c['ticker']}** — {badge}")
             m = c["m"]
             candle_txt = {True: "🟩 candle hijau", False: "🟥 candle merah", None: "candle ?"}[m["candle_hijau"]]
+            lari_txt = f" · Lari hari ini {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
             st.caption(f"{c['sektor']} · Gap vs sektor {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                      f"{candle_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
+                      f"{candle_txt}{lari_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
             if c["penalty"]:
                 st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
             if c.get("rss", {}).get("gagal"):
@@ -665,6 +703,50 @@ def tampilkan_screener():
     status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
     st.write(f"{status_icon.get(eq['status'], '')} **{eq['status'].replace('_', ' ').title()}**")
     st.caption(eq["detail"])
+
+    # --- Manajemen Posisi Aktif (SL keras + trailing-lock + override regime)
+    if posisi:
+        st.subheader("Manajemen Posisi Aktif")
+        p_ticker, p_entry, p_tgl = posisi["ticker"], posisi["harga_beli"], posisi["tanggal_beli"]
+        if p_ticker in harga_map:
+            harga_posisi = harga_map[p_ticker]["Close"]
+        else:
+            data_p = ambil_universe((p_ticker,))
+            harga_posisi = data_p.get(p_ticker, {}).get("Close") if data_p else None
+            if harga_posisi is None:
+                harga_posisi = pd.Series(dtype=float)
+
+        harga_sejak_beli = harga_posisi[harga_posisi.index >= p_tgl]
+        if len(harga_sejak_beli) == 0:
+            st.warning(f"Tidak ada data harga {p_ticker} sejak tanggal beli -- cek ticker/tanggal, atau data belum tersedia.")
+        else:
+            harga_now_p = float(harga_sejak_beli.iloc[-1])
+            peak_p = float(harga_sejak_beli.max())
+            return_now = (harga_now_p - p_entry) / p_entry
+            peak_return = (peak_p - p_entry) / p_entry
+            sl_keras_harga = p_entry * (1 + SL_KERAS_PCT)
+            trailing_aktif = peak_return >= TRAILING_AKTIF_GAIN
+            trailing_floor = p_entry * (1 + TRAILING_LOCK_PCT * peak_return) if trailing_aktif else None
+            regime_bear = ihsg["fase"] == "BEAR"
+
+            if harga_now_p <= sl_keras_harga:
+                rekom, alasan = "🔴 EXIT", f"SL keras {SL_KERAS_PCT*100:.0f}% kena (harga {harga_now_p:.0f} <= {sl_keras_harga:.0f})"
+            elif regime_bear:
+                rekom, alasan = "🔴 EXIT", "IHSG sudah balik ke fase BEAR -- override regime, keluar terlepas status trailing-lock"
+            elif trailing_aktif and harga_now_p <= trailing_floor:
+                rekom, alasan = "🔴 EXIT", f"Trailing-lock kena (harga {harga_now_p:.0f} <= floor {trailing_floor:.0f})"
+            elif trailing_aktif:
+                rekom, alasan = "🟢 HOLD", f"Trailing-lock aktif, floor saat ini {trailing_floor:.0f}"
+            else:
+                rekom, alasan = "🟡 HOLD (belum ada proteksi profit)", f"Gain {return_now*100:+.1f}%, trailing-lock aktif di gain >={TRAILING_AKTIF_GAIN*100:.0f}%. SL keras di {sl_keras_harga:.0f}."
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Harga sekarang", f"{harga_now_p:.0f}", f"{return_now*100:+.1f}%")
+            c2.metric("SL keras", f"{sl_keras_harga:.0f}")
+            c3.metric("Trailing floor", f"{trailing_floor:.0f}" if trailing_floor else "belum aktif")
+            st.write(f"**{rekom}**")
+            st.caption(alasan)
+
 
     st.divider()
     st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
