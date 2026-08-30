@@ -59,14 +59,41 @@ MODAL_EQUITAS = 20_000_000
 # ternyata malah bikin Yahoo lebih curiga).
 # =====================================================================
 @st.cache_data(ttl=900, show_spinner=False)
-def ambil_ihsg(start="2000-01-01"):
+def ambil_ihsg_status():
+    """Data 2 tahun terakhir saja -- cukup untuk hitung fase saat ini (rolling 252 hari).
+    Request kecil, meniru pola ambil_makro() Turtle Board yang terbukti jalan."""
     try:
-        df = yf.download("^JKSE", start=start, interval="1d", progress=False, auto_adjust=False)
+        df = yf.download(["^JKSE"], period="2y", interval="1d", progress=False,
+                         auto_adjust=False, group_by="ticker", threads=True)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df["Close"].dropna()
+            close = df["^JKSE"]["Close"].dropna()
+        else:
+            close = df["Close"].dropna()
+        return close
     except Exception:
         return pd.Series(dtype=float)
+
+
+# =====================================================================
+# BACKTEST HISTORIS -- DATA STATIS, BUKAN LIVE
+# =====================================================================
+# 7 episode bear market IHSG (>=20% drawdown) sejak 2000 sudah SELESAI --
+# angkanya tidak berubah lagi, jadi tidak perlu ditarik ulang tiap app dibuka
+# (itu yang selama ini bikin request besar & rentan gagal). Dihitung sekali
+# dari data Yahoo Finance per 30 Agustus 2026 lewat backtest_regime.py.
+# Kalau mau di-refresh (misal setelah episode baru selesai/lewat setahun),
+# jalankan ulang skrip backtest terpisah lalu update angka di bawah manual --
+# bukan bagian dari app yang jalan tiap hari.
+BACKTEST_HISTORIS = [
+    {"horizon": 20, "n": 7, "avg": -0.8, "pct_pos": 57.0, "worst": -9.6, "mae_avg": -5.0},
+    {"horizon": 40, "n": 7, "avg": 4.3, "pct_pos": 86.0, "worst": -1.0, "mae_avg": -5.0},
+    {"horizon": 60, "n": 7, "avg": 6.6, "pct_pos": 71.0, "worst": -2.8, "mae_avg": -5.4},
+    {"horizon": 120, "n": 7, "avg": 12.2, "pct_pos": 86.0, "worst": -8.8, "mae_avg": -7.1},
+]
+
+# Sektor pemimpin historis di fase bottom-rebound (dari episode 2020 & 2025 yang
+# datanya tersedia) -- referensi pola, BUKAN jaminan berulang setiap kali.
+SEKTOR_HISTORIS_TERCEPAT = ["Barang Baku", "Energi", "Perindustrian"]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -336,16 +363,16 @@ st.title("Regime Screener")
 if st.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-with st.spinner("Menarik data IHSG..."):
-    ihsg_close = ambil_ihsg()
+with st.spinner("Menarik data status IHSG..."):
+    ihsg_close = ambil_ihsg_status()
 
 if len(ihsg_close) == 0:
     st.error("Gagal menarik data IHSG dari Yahoo Finance. Coba tekan Refresh data beberapa menit lagi.")
     st.stop()
 
 episodes = hitung_episode(ihsg_close)
-backtest = ringkas_backtest(episodes)
 ihsg = status_ihsg(ihsg_close, episodes)
+backtest = BACKTEST_HISTORIS
 
 # --- Tahap 1
 st.subheader("Tahap 1 — Status IHSG")
@@ -357,16 +384,15 @@ if ihsg["pct_dari_trough"] is not None:
     c3.metric("Dari bottom", f"{ihsg['pct_dari_trough']:+.1f}%")
 st.caption(note)
 
-with st.expander("Backtest probabilitas historis (episode sejak 2000)"):
-    if backtest:
-        st.dataframe(
-            [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
-              "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
-              "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
-            hide_index=True, use_container_width=True,
-        )
-    else:
-        st.caption("Belum ada episode selesai untuk dibandingkan.")
+with st.expander("Backtest probabilitas historis (7 episode sejak 2000)"):
+    st.dataframe(
+        [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
+          "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
+          "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
+        hide_index=True, width="stretch",
+    )
+    st.caption("Data statis, dihitung dari histori Yahoo Finance per 30 Agustus 2026 -- "
+              "bukan ditarik ulang tiap app dibuka, karena episode-episode ini sudah selesai.")
 
 if ihsg["fase"] == "NORMAL" or ihsg["trough_date"] is None:
     st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
@@ -382,6 +408,9 @@ if not harga_map:
 
 # --- Tahap 2
 st.subheader("Tahap 2 — Status Sektor")
+st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
+          f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
+          f"tapi pola tiap siklus bisa beda, cek ranking live di bawah.")
 sektor = status_sektor(harga_map, ihsg["trough_date"])
 for s in sektor:
     status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
