@@ -570,10 +570,22 @@ def render_radar(dimensi, judul):
     nilai = [dimensi[l] for l in RADAR_LABEL] + [dimensi[RADAR_LABEL[0]]]
     label = RADAR_LABEL + [RADAR_LABEL[0]]
     fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=nilai, theta=label, fill="toself", name=judul))
+    fig.add_trace(go.Scatterpolar(
+        r=nilai, theta=label, fill="toself", name=judul,
+        fillcolor="rgba(230,180,60,0.35)",
+        line=dict(color="rgba(230,180,60,0.9)", width=2),
+    ))
     fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=9))),
-        showlegend=False, height=260, margin=dict(l=30, r=30, t=20, b=20),
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
+                           gridcolor="rgba(150,150,150,0.25)", linecolor="rgba(150,150,150,0.25)"),
+            angularaxis=dict(tickfont=dict(size=11, color="#9a9a9a"),
+                            gridcolor="rgba(150,150,150,0.25)", linecolor="rgba(150,150,150,0.25)"),
+        ),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False, height=240, margin=dict(l=40, r=40, t=20, b=20),
+        font=dict(color="#9a9a9a"),
     )
     st.plotly_chart(fig, use_container_width=True, key=f"radar_{judul}")
 
