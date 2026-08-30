@@ -58,33 +58,51 @@ MODAL_EQUITAS = 20_000_000
 # cache_data, gagal-lanjut (bukan retry-loop dengan session custom yang
 # ternyata malah bikin Yahoo lebih curiga).
 # =====================================================================
-@st.cache_data(ttl=900, show_spinner=False)
-def ambil_ihsg_status():
-    """Data 2 tahun terakhir saja -- cukup untuk hitung fase saat ini (rolling 252 hari).
-    Request kecil, meniru pola ambil_makro() Turtle Board yang terbukti jalan.
+# =====================================================================
+# REFERENSI SIKLUS 2026 -- DATA STATIS (puncak & bottom sudah jadi sejarah)
+# =====================================================================
+PUNCAK_2026 = 9134.70                         # 20 Jan 2026
+TROUGH_2026_HARGA = 5342.14                   # 8 Jun 2026
+TROUGH_2026_TANGGAL = pd.Timestamp("2026-06-08")
 
-    Mengembalikan (close, error_message) -- error_message None kalau berhasil,
-    supaya kalau gagal, ALASAN SEBENARNYA kelihatan di layar, bukan disembunyikan
-    di balik pesan generik seperti sebelumnya."""
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ambil_harga_ihsg_now():
+    """Cuma butuh HARGA HARI INI -- puncak & bottom siklus 2026 sudah statis di atas,
+    tidak perlu tarik histori panjang lagi cuma untuk tahu posisi sekarang.
+    Tetap diminta bareng ticker lain (bukan sendirian) -- pola yang terbukti jalan.
+    Mengembalikan (harga, tanggal, error_message)."""
+    tambahan = ["IDR=X", "^IXIC"]
     try:
-        df = yf.download(["^JKSE"], period="2y", interval="1d", progress=False,
+        df = yf.download(["^JKSE"] + tambahan, period="5d", interval="1d", progress=False,
                          auto_adjust=False, group_by="ticker", threads=True)
         if df is None or df.empty:
-            return pd.Series(dtype=float), f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
+            return None, None, f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
         if isinstance(df.columns, pd.MultiIndex):
             if "^JKSE" not in df.columns.get_level_values(0):
-                return pd.Series(dtype=float), f"Kolom tidak ada '^JKSE'. Kolom yang ada: {list(df.columns)[:10]}"
+                return None, None, f"Kolom tidak ada '^JKSE'. Kolom yang ada: {list(df.columns)[:10]}"
             close = df["^JKSE"]["Close"].dropna()
         else:
-            if "Close" not in df.columns:
-                return pd.Series(dtype=float), f"Kolom 'Close' tidak ada. Kolom yang ada: {list(df.columns)}"
             close = df["Close"].dropna()
         if len(close) == 0:
-            return pd.Series(dtype=float), "Kolom Close ada tapi semua nilai NaN/kosong setelah dropna()."
-        return close, None
+            return None, None, "Kolom Close ada tapi semua nilai NaN/kosong setelah dropna()."
+        return float(close.iloc[-1]), close.index[-1], None
     except Exception as e:
         import traceback
-        return pd.Series(dtype=float), f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        return None, None, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+
+
+def status_ihsg_ringan(harga_now, tanggal):
+    drawdown_52w = (harga_now - PUNCAK_2026) / PUNCAK_2026 * 100
+    pct_dari_trough = (harga_now - TROUGH_2026_HARGA) / TROUGH_2026_HARGA * 100
+    if pct_dari_trough >= NORMALIZING_TRIGGER * 100:
+        fase = "NORMALIZING"
+    elif pct_dari_trough >= REBOUND_TRIGGER * 100:
+        fase = "BOTTOM-REBOUND"
+    else:
+        fase = "BEAR"
+    return {"harga": harga_now, "tanggal": tanggal, "drawdown_52w": drawdown_52w,
+           "fase": fase, "trough_date": TROUGH_2026_TANGGAL, "pct_dari_trough": pct_dari_trough}
 
 
 # =====================================================================
@@ -376,17 +394,16 @@ st.title("Regime Screener")
 if st.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-with st.spinner("Menarik data status IHSG..."):
-    ihsg_close, ihsg_error = ambil_ihsg_status()
+with st.spinner("Menarik harga IHSG hari ini..."):
+    harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
 
-if len(ihsg_close) == 0:
-    st.error("Gagal menarik data IHSG dari Yahoo Finance.")
+if harga_now is None:
+    st.error("Gagal menarik harga IHSG dari Yahoo Finance.")
     st.code(ihsg_error or "Tidak ada pesan error tercatat.")
     st.caption("Salin pesan error di atas dan kirim ke saya -- itu penyebab sebenarnya, bukan tebakan.")
     st.stop()
 
-episodes = hitung_episode(ihsg_close)
-ihsg = status_ihsg(ihsg_close, episodes)
+ihsg = status_ihsg_ringan(harga_now, tanggal_now)
 backtest = BACKTEST_HISTORIS
 
 # --- Tahap 1
