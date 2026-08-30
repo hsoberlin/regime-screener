@@ -68,13 +68,14 @@ TROUGH_2026_TANGGAL = pd.Timestamp("2026-06-08")
 
 @st.cache_data(ttl=900, show_spinner=False)
 def ambil_harga_ihsg_now():
-    """Cuma butuh HARGA HARI INI -- puncak & bottom siklus 2026 sudah statis di atas,
-    tidak perlu tarik histori panjang lagi cuma untuk tahu posisi sekarang.
-    Tetap diminta bareng ticker lain (bukan sendirian) -- pola yang terbukti jalan.
+    """Fungsi ini SALINAN PERSIS ambil_makro() Turtle Board (tickers, period, semua
+    parameter sama persis) -- terbukti jalan di server yang sama. Tidak dimodifikasi
+    lagi supaya tidak ada lagi tebakan soal parameter mana yang beda.
     Mengembalikan (harga, tanggal, error_message)."""
-    tambahan = ["IDR=X", "^IXIC"]
+    peta = {"^JKSE": "IHSG", "IDR=X": "USDIDR", "CL=F": "MINYAK",
+            "GC=F": "EMAS", "HG=F": "TEMBAGA", "^IXIC": "NASDAQ"}
     try:
-        df = yf.download(["^JKSE"] + tambahan, period="5d", interval="1d", progress=False,
+        df = yf.download(list(peta), period="1mo", interval="1d", progress=False,
                          auto_adjust=False, group_by="ticker", threads=True)
         if df is None or df.empty:
             return None, None, f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
