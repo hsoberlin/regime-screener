@@ -486,11 +486,16 @@ def gerbang_keras(ticker, m, sector_median_dd):
 
 
 def penalti_berat_naik(ticker, info, sector_der_median, market_caps, beta_manual):
+    """Beta dihitung manual (lihat hitung_beta), sudah diverifikasi akurat.
+    DER dan marketCap masih dari yfinance.info -- marketCap kelihatan konsisten
+    (dicek manual vs urutan besar wajar), tapi DER TIDAK terverifikasi penuh:
+    ditemukan gap nyata untuk SMGR (yfinance 21,1% vs sumber lain 65,54%),
+    arahnya tidak separah beta (tidak terbalik), tapi jangan dianggap presisi."""
     alasan = []
     der, mcap = info.get("debtToEquity"), info.get("marketCap")
     if der is not None and sector_der_median:
         if der > sector_der_median * BERAT_NAIK_DER_MULTIPLIER:
-            alasan.append(f"DER {der:.0f} tinggi")
+            alasan.append(f"DER {der:.0f} tinggi (dari yfinance, akurasi belum terverifikasi -- ada gap dengan sumber lain saat dicek manual)")
     if beta_manual is not None and abs(beta_manual) < BERAT_NAIK_BETA_THRESHOLD:
         alasan.append(f"beta {beta_manual:.2f} mendekati nol (dihitung manual vs IHSG)")
     if mcap is not None and market_caps:
