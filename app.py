@@ -528,7 +528,7 @@ def skor_dan_tier(m, gate, penalty):
 # =====================================================================
 # RADAR 5 DIMENSI (langkah awal, terinspirasi Snowflake Analysis)
 # =====================================================================
-RADAR_LABEL = ["Gap sektor", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
+RADAR_LABEL = ["Gap", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
 
 
 def hitung_dimensi_radar(c):
@@ -561,7 +561,7 @@ def hitung_dimensi_radar(c):
         eksekusi_dim += 20
     eksekusi_dim = max(0, min(100, eksekusi_dim))
 
-    return {"Gap sektor": round(gap_dim), "Partisipasi": round(part_dim),
+    return {"Gap": round(gap_dim), "Partisipasi": round(part_dim),
            "Kualitas": round(kualitas_dim), "Sentimen": round(sentimen_dim),
            "Eksekusi": round(eksekusi_dim)}
 
@@ -672,17 +672,10 @@ def tampilkan_screener():
     ihsg = status_ihsg_ringan(harga_now, tanggal_now)
     backtest = BACKTEST_HISTORIS
 
-    # --- Tahap 1
-    st.subheader("Tahap 1 — Status IHSG")
+    # --- Tahap 1 (ringkas, collapsed -- info penting ada di judul expander)
     light, note = traffic_light(ihsg["fase"], backtest)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Fase", f"{light} {ihsg['fase']}")
-    c2.metric("Harga IHSG", f"{ihsg['harga']:.0f}")
-    if ihsg["pct_dari_trough"] is not None:
-        c3.metric("Dari bottom", f"{ihsg['pct_dari_trough']:+.1f}%")
-    st.caption(note)
-
-    with st.expander("Backtest probabilitas historis (7 episode sejak 2000)"):
+    with st.expander(f"{light} IHSG {ihsg['fase']} · {ihsg['harga']:.0f} · {ihsg['pct_dari_trough']:+.1f}% dari bottom"):
+        st.caption(note)
         st.dataframe(
             [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
               "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
@@ -705,22 +698,23 @@ def tampilkan_screener():
                   "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
         st.stop()
 
-    # --- Tahap 2
-    st.subheader("Tahap 2 — Status Sektor")
-    st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
-              f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
-              f"tapi pola tiap siklus bisa beda, cek ranking live di bawah.")
+    # --- Tahap 2 (ringkas, collapsed -- sektor teratas ada di judul expander)
     sektor = status_sektor(harga_map, ihsg["trough_date"])
-    for s in sektor:
-        status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
-        st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
+    sektor_top = sektor[0]["sektor"] if sektor else "-"
+    with st.expander(f"🏆 Sektor teratas: {sektor_top} · {len(sektor)} sektor dipantau"):
+        st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
+                  f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
+                  f"tapi pola tiap siklus bisa beda.")
+        for s in sektor:
+            status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
+            st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
 
     ihsg_beta_series = ambil_ihsg_untuk_beta()
 
     sector_return_map = {s["sektor"]: s["return"] for s in sektor}
 
     # --- Tahap 3
-    st.subheader("Tahap 3 — Kandidat Emiten")
+    st.subheader("Kandidat emiten")
     kandidat = []
     for sektor_nama, tickers in SECTOR_BASKETS.items():
         sector_avg = sector_return_map.get(sektor_nama, 0)
@@ -770,47 +764,58 @@ def tampilkan_screener():
     shown_kuat = [c for c in kandidat if c["tier"] == "kuat"]
     shown_menunggu = [c for c in kandidat if c["tier"] == "menunggu"]
 
-    def render_kartu(c):
+    def render_kartu_kuat(c):
+        """Kartu Tier Kuat -- radar jadi elemen utama, minim teks. Detail lengkap
+        (gap/vol/candle/lari/value/penalti/RSS) dipadatkan ke satu expander kecil."""
         if eq["pilihan"] == c["ticker"]:
-            badge = "🟢 All-in Rp20jt"
+            badge_emoji, badge_txt = "🟢", "All-in"
         elif c["ticker"] in eq.get("menunggu", []):
-            badge = "🟡 Cash ditahan"
+            badge_emoji, badge_txt = "🟡", "Cash ditahan"
         else:
-            badge = {"kuat": "Kandidat kuat", "menunggu": "Menunggu konfirmasi"}.get(c["tier"], c["tier"])
+            badge_emoji, badge_txt = "⚪", "Kandidat"
+        m = c["m"]
         with st.container(border=True):
-            st.write(f"**{c['ticker']}** — {badge}")
-            m = c["m"]
-            candle_txt = {True: "🟩 candle hijau", False: "🟥 candle merah", None: "candle ?"}[m["candle_hijau"]]
-            lari_txt = f" · Lari hari ini {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
-            st.caption(f"{c['sektor']} · Gap vs sektor {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                      f"{candle_txt}{lari_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
-            if c["penalty"]:
-                st.caption(f"⚠️ Berat naik: {', '.join(c['penalty'])}")
-            if c.get("rss", {}).get("gagal"):
-                st.caption("📡 RSS: gagal dicek (koneksi bermasalah, bukan berarti aman)")
-            elif c.get("rss") and c["rss"]["judul"]:
-                emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
-                st.caption(f"📡 Update terakhir ({c['rss']['tanggal']}) {emoji_sentimen} {c['rss']['sentimen']}: {c['rss']['judul']}")
-            elif "rss" in c:
-                st.caption("📡 RSS: tidak ada berita ditemukan dari Kontan/Bisnis.com/Emitennews/Katadata")
+            col1, col2 = st.columns([2, 1])
+            col1.markdown(f"### {c['ticker']}")
+            col2.markdown(f"<div style='text-align:right;padding-top:14px;font-size:14px'>{badge_emoji} {badge_txt}</div>",
+                          unsafe_allow_html=True)
+            render_radar(hitung_dimensi_radar(c), c["ticker"])
             if eq["pilihan"] == c["ticker"]:
-                st.line_chart(m["harga_20h"], height=120)
-            if c["tier"] == "kuat":
-                with st.expander("Radar 5 dimensi"):
-                    render_radar(hitung_dimensi_radar(c), c["ticker"])
+                st.line_chart(m["harga_20h"], height=100)
+            with st.expander("Detail"):
+                candle_txt = {True: "🟩 hijau", False: "🟥 merah", None: "?"}[m["candle_hijau"]]
+                lari_txt = f" · Lari {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
+                st.caption(f"{c['sektor']} · Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
+                          f"{candle_txt}{lari_txt} · Rp{m['value_sesi_ini']/1e9:.0f}M")
+                if c["penalty"]:
+                    st.caption(f"⚠️ {', '.join(c['penalty'])}")
+                if c.get("rss", {}).get("gagal"):
+                    st.caption("📡 RSS gagal dicek")
+                elif c.get("rss") and c["rss"]["judul"]:
+                    emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
+                    st.caption(f"📡 {emoji_sentimen} ({c['rss']['tanggal']}) {c['rss']['judul']}")
+                elif "rss" in c:
+                    st.caption("📡 Tidak ada berita ditemukan")
+
+    def render_kartu_ringkas(c):
+        """Kartu Tier Menunggu Konfirmasi -- padat, tanpa radar (belum layak jadi fokus visual)."""
+        m = c["m"]
+        candle_txt = {True: "🟩", False: "🟥", None: "?"}[m["candle_hijau"]]
+        with st.container(border=True):
+            st.write(f"**{c['ticker']}** · {c['sektor']}")
+            st.caption(f"Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · {candle_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
 
     if not shown_kuat and not shown_menunggu:
         st.info("Tidak ada kandidat lolos gerbang saat ini.")
 
     if shown_kuat:
-        st.caption(f"Tier kuat · {len(shown_kuat)} kandidat")
         for c in shown_kuat:
-            render_kartu(c)
+            render_kartu_kuat(c)
 
     if shown_menunggu:
         with st.expander(f"Tier menunggu konfirmasi · {len(shown_menunggu)} saham (belum ada sinyal partisipasi)"):
             for c in shown_menunggu:
-                render_kartu(c)
+                render_kartu_ringkas(c)
 
     excluded_rss = [c for c in kandidat if c.get("rss", {}).get("negatif")]
     if excluded_rss:
