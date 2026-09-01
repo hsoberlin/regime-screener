@@ -10,8 +10,14 @@ laggard sektor, dengan bobot ekuitas Rp20 juta all-in ke satu kandidat terbaik.
     3. Kandidat Emiten -- gerbang keras -> skor -> tier, dalam sektor yang sudah bergerak
     4. Bobot Ekuitas -- all-in / tie-breaker / cash ditahan / cash menganggur
 
+Tema visual: identitas terpisah dari Turtle Board (Opsi B, disetujui 1 Sep 2026).
+Dasar hangat/gelap + aksen amber redup, bukan neon -- radar chart jadi elemen
+utama tiap kartu kandidat. Space Grotesk untuk judul/ticker, IBM Plex Mono
+untuk angka -- sengaja beda font dari Orbitron/JetBrains Mono-nya Turtle Board
+supaya dua app ini terasa sebagai dua alat yang beda karakter meski satu keluarga.
+
 Jalankan:  streamlit run app.py
-Kebutuhan: streamlit yfinance pandas numpy
+Kebutuhan: streamlit yfinance pandas numpy plotly requests
 """
 
 import numpy as np
@@ -23,6 +29,123 @@ import yfinance as yf
 from datetime import datetime
 
 st.set_page_config(page_title="Regime Screener", layout="centered")
+
+# =====================================================================
+# TEMA VISUAL -- Opsi B: identitas terpisah dari Turtle Board
+# =====================================================================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg: #15110C;
+  --card: #1F1811;
+  --card-line: #2A2118;
+  --amber: #B8823D;
+  --karat: #8B4539;
+  --text: #E8DFD3;
+  --text-dim: #9C8F7A;
+}
+
+.stApp { background-color: var(--bg); }
+.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div { color: var(--text); }
+
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+  font-family: 'Space Grotesk', sans-serif !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.3px;
+  color: var(--text) !important;
+}
+
+[data-testid="stMetricValue"], .stCaptionContainer, .stCaptionContainer p,
+code, .stMarkdown code {
+  font-family: 'IBM Plex Mono', monospace !important;
+}
+.stCaptionContainer, .stCaptionContainer p { color: var(--text-dim) !important; }
+
+/* --- panel status berjenjang: angka besar + label kecil, bukan baris titik-titik --- */
+.rs-panel {
+  padding: 16px 20px;
+  border-radius: 6px;
+  background: var(--card);
+  border-left: 3px solid var(--amber);
+  margin-bottom: 10px;
+}
+.rs-panel.karat { border-left-color: var(--karat); }
+.rs-label {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px; font-weight: 700; letter-spacing: 2px;
+  color: var(--amber); margin-bottom: 6px; text-transform: uppercase;
+}
+.rs-panel.karat .rs-label { color: var(--karat); }
+.rs-angka {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 32px; font-weight: 600; color: var(--text); line-height: 1.1;
+}
+.rs-sub {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px; color: var(--text-dim); margin-top: 5px;
+}
+
+/* --- ranking sektor: bar horizontal, bukan daftar titik-titik --- */
+.rs-sektor-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.rs-sektor-nama {
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px;
+  width: 168px; flex-shrink: 0; color: var(--text);
+}
+.rs-sektor-bar-bg {
+  flex: 1; background: var(--card-line); border-radius: 3px;
+  height: 14px; overflow: hidden;
+}
+.rs-sektor-bar-isi { background: var(--amber); height: 100%; opacity: 0.85; }
+.rs-sektor-nilai {
+  font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+  width: 58px; text-align: right; color: var(--text-dim); flex-shrink: 0;
+}
+
+/* --- badge status kandidat --- */
+.rs-badge {
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+  padding: 3px 11px; border-radius: 10px; letter-spacing: 0.5px;
+  display: inline-block;
+}
+.rs-badge-allin {
+  background: rgba(184,130,61,0.18); color: var(--amber);
+  border: 1px solid rgba(184,130,61,0.45);
+}
+.rs-badge-tahan {
+  background: rgba(232,223,211,0.06); color: var(--text-dim);
+  border: 1px solid rgba(232,223,211,0.15);
+}
+.rs-badge-kandidat {
+  background: transparent; color: var(--text-dim);
+  border: 1px solid rgba(232,223,211,0.1);
+}
+
+/* --- kartu kandidat: container native streamlit, diwarnai ulang --- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--card) !important;
+  border-color: var(--card-line) !important;
+  border-radius: 8px !important;
+}
+
+section[data-testid="stSidebar"] { background: #100D09; border-right: 1px solid var(--card-line); }
+section[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+[data-testid="stMetricLabel"] { color: var(--text-dim) !important; }
+[data-testid="stMetricValue"] { color: var(--text) !important; font-family: 'IBM Plex Mono', monospace !important; }
+[data-testid="stMetricDelta"] { font-family: 'IBM Plex Mono', monospace !important; }
+
+.stButton button {
+  background: var(--card) !important; color: var(--amber) !important;
+  border: 1px solid rgba(184,130,61,0.35) !important;
+  font-family: 'Space Grotesk', sans-serif !important; font-weight: 600 !important;
+}
+.stButton button:hover { border-color: var(--amber) !important; }
+
+[data-testid="stExpander"] { border-color: var(--card-line) !important; background: var(--card) !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================================================
 # UNIVERSE -- basket representatif per sektor (bukan 840 emiten penuh)
@@ -71,11 +194,6 @@ SL_KERAS_PCT = -0.10           # SL keras dari harga entry, aktif SEJAK HARI PER
 TRAILING_AKTIF_GAIN = 0.10     # trailing-lock baru aktif setelah gain >= ini
 TRAILING_LOCK_PCT = 0.75       # trailing-lock mengunci 75% dari gain puncak
 
-# =====================================================================
-# PENGAMBILAN DATA -- pola sama seperti Turtle Board: polos, batching,
-# cache_data, gagal-lanjut (bukan retry-loop dengan session custom yang
-# ternyata malah bikin Yahoo lebih curiga).
-# =====================================================================
 # =====================================================================
 # REFERENSI SIKLUS 2026 -- DATA STATIS (puncak & bottom sudah jadi sejarah)
 # =====================================================================
@@ -169,13 +287,6 @@ def status_ihsg_ringan(harga_now, tanggal):
 # =====================================================================
 # BACKTEST HISTORIS -- DATA STATIS, BUKAN LIVE
 # =====================================================================
-# 7 episode bear market IHSG (>=20% drawdown) sejak 2000 sudah SELESAI --
-# angkanya tidak berubah lagi, jadi tidak perlu ditarik ulang tiap app dibuka
-# (itu yang selama ini bikin request besar & rentan gagal). Dihitung sekali
-# dari data Yahoo Finance per 30 Agustus 2026 lewat backtest_regime.py.
-# Kalau mau di-refresh (misal setelah episode baru selesai/lewat setahun),
-# jalankan ulang skrip backtest terpisah lalu update angka di bawah manual --
-# bukan bagian dari app yang jalan tiap hari.
 BACKTEST_HISTORIS = [
     {"horizon": 20, "n": 7, "avg": -0.8, "pct_pos": 57.0, "worst": -9.6, "mae_avg": -5.0},
     {"horizon": 40, "n": 7, "avg": 4.3, "pct_pos": 86.0, "worst": -1.0, "mae_avg": -5.0},
@@ -183,8 +294,6 @@ BACKTEST_HISTORIS = [
     {"horizon": 120, "n": 7, "avg": 12.2, "pct_pos": 86.0, "worst": -8.8, "mae_avg": -7.1},
 ]
 
-# Sektor pemimpin historis di fase bottom-rebound (dari episode 2020 & 2025 yang
-# datanya tersedia) -- referensi pola, BUKAN jaminan berulang setiap kali.
 SEKTOR_HISTORIS_TERCEPAT = ["Barang Baku", "Energi", "Perindustrian"]
 
 
@@ -221,14 +330,6 @@ def ambil_info(ticker):
 # =====================================================================
 # RSS BERITA -- VERSI SEDERHANA (30 Agu 2026)
 # =====================================================================
-# Cuma 1 sumber (Google News RSS, tidak perlu scraping tiap situs media satu-satu)
-# + keyword dasar. Gerbang keras terpisah dari DER/beta/ukuran -- kalau ketemu
-# berita negatif di 5 judul terbaru, saham di-exclude total.
-# Fail-open: kalau RSS gagal diakses (bukan soal Yahoo Finance, ini web biasa),
-# dianggap TIDAK ada berita negatif -- bukan otomatis exclude. Keterbatasan jujur:
-# ini bukan pengecekan konteks/negasi (lihat diskusi RSS Corporate Action sebelumnya),
-# jadi bisa salah tangkap ("rugi tahun lalu, kini untung" tetap kena kata "rugi").
-# Perlu direview manual kalau ada yang ke-exclude gara-gara ini.
 RSS_KEYWORD_NEGATIF = [
     "gagal bayar", "pailit", "bangkrut", "delisting", "suspend", "korupsi",
     "gugatan", "kasus dugaan", "penipuan", "skandal", "pkpu", "rugi besar",
@@ -246,13 +347,7 @@ RSS_KEYWORD_POSITIF = [
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cek_rss_negatif(ticker):
-    """Mengembalikan dict berisi berita PALING BARU (apapun sentimennya) + status exclude.
-
-    Selalu kasih tahu update terakhir apa (judul, tanggal, sentimen) -- bukan cuma pas
-    negatif. 5 berita diurutkan ulang berdasarkan tanggal asli (urutan Google News TIDAK
-    selalu kronologis murni), lalu cuma berita PALING BARU yang menentukan status:
-    kalau yang terbaru negatif -> exclude; kalau sudah "ditutup" berita lebih baru yang
-    bersih/positif, tidak exclude lagi -- meski ada berita negatif lebih lama di 5 itu."""
+    """Mengembalikan dict berisi berita PALING BARU (apapun sentimennya) + status exclude."""
     import email.utils
     import urllib.parse
     import xml.etree.ElementTree as ET
@@ -298,7 +393,7 @@ def cek_rss_negatif(ticker):
         return {"negatif": negatif, "judul": judul_terbaru, "tanggal": tgl_str,
                "sentimen": sentimen, "n_berita": len(berita), "gagal": False}
     except Exception:
-        return {**kosong, "gagal": True}  # fail-open, ditandai jelas "gagal" bukan "aman"
+        return {**kosong, "gagal": True}
 
 
 # =====================================================================
@@ -456,13 +551,7 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
     roll_max = close.rolling(min(len(close), 750), min_periods=50).max()
     dd = (close - roll_max) / roll_max * 100
     max_dd = float(dd.min()) if not dd.isna().all() else 0.0
-    # candle hari ini hijau atau merah -- volume besar di candle MERAH itu tanda
-    # distribusi/jual, bukan akumulasi, meski volume ratio-nya tinggi
     candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
-    # seberapa jauh harga sudah lari dari open HARI INI -- proxy harian untuk konsep
-    # LARI SEJAK Turtle Board (kita tidak punya data intraday, jadi ini bukan "sejak
-    # sinyal muncul", tapi "sejak open hari ini" -- kalau sudah lari jauh, risiko beli
-    # di puncak harian lebih besar)
     lari_hari_ini = float((close.iloc[-1] - open_.iloc[-1]) / open_.iloc[-1]) if open_ is not None and open_.iloc[-1] > 0 else None
     return {
         "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
@@ -473,11 +562,6 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
 
 
 def gerbang_keras(ticker, m, sector_median_dd):
-    """Gerbang keras -- gagal salah satu = tidak lolos ke skor sama sekali.
-    Ambang drawdown DILONGGARKAN (30 Agu 2026, multiplier 2.0 bukan 1.5) -- krisis
-    market-wide bikin banyak saham bagus ikut drawdown dalam karena panic selling,
-    bukan masalah perusahaan sendiri. DER (penalti lunak) & RSS (di bawah) yang
-    jadi penjaga utama kualitas fundamental, bukan drawdown harga semata."""
     alasan = []
     if ticker in PAPAN_PENGEMBANGAN:
         alasan.append("Papan Pengembangan")
@@ -487,11 +571,6 @@ def gerbang_keras(ticker, m, sector_median_dd):
 
 
 def penalti_berat_naik(ticker, info, sector_der_median, market_caps, beta_manual):
-    """Beta dihitung manual (lihat hitung_beta), sudah diverifikasi akurat.
-    DER dan marketCap masih dari yfinance.info -- marketCap kelihatan konsisten
-    (dicek manual vs urutan besar wajar), tapi DER TIDAK terverifikasi penuh:
-    ditemukan gap nyata untuk SMGR (yfinance 21,1% vs sumber lain 65,54%),
-    arahnya tidak separah beta (tidak terbalik), tapi jangan dianggap presisi."""
     alasan = []
     der, mcap = info.get("debtToEquity"), info.get("marketCap")
     if der is not None and sector_der_median:
@@ -532,9 +611,6 @@ RADAR_LABEL = ["Gap", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
 
 
 def hitung_dimensi_radar(c):
-    """5 skor 0-100 per kandidat: Gap sektor, Partisipasi, Kualitas (fundamental),
-    Sentimen (RSS), Eksekusi (volume+candle+lari hari ini). Skala kasar, untuk
-    perbandingan visual antar kandidat -- bukan skor presisi."""
     m = c["m"]
 
     gap_dim = max(0, min(100, -m["gap"] * 3))  # -33% gap = 100
@@ -567,25 +643,27 @@ def hitung_dimensi_radar(c):
 
 
 def render_radar(dimensi, judul):
+    """Warna amber redup (Opsi B) -- ganti dari kuning-emas default sebelumnya,
+    supaya konsisten dengan token warna baru dan beda karakter dari Turtle Board."""
     nilai = [dimensi[l] for l in RADAR_LABEL] + [dimensi[RADAR_LABEL[0]]]
     label = RADAR_LABEL + [RADAR_LABEL[0]]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(
         r=nilai, theta=label, fill="toself", name=judul,
-        fillcolor="rgba(230,180,60,0.35)",
-        line=dict(color="rgba(230,180,60,0.9)", width=2),
+        fillcolor="rgba(184,130,61,0.35)",
+        line=dict(color="rgba(184,130,61,0.9)", width=2),
     ))
     fig.update_layout(
         polar=dict(
             bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
-                           gridcolor="rgba(150,150,150,0.25)", linecolor="rgba(150,150,150,0.25)"),
-            angularaxis=dict(tickfont=dict(size=11, color="#9a9a9a"),
-                            gridcolor="rgba(150,150,150,0.25)", linecolor="rgba(150,150,150,0.25)"),
+                           gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
+            angularaxis=dict(tickfont=dict(size=11, color="#9C8F7A", family="IBM Plex Mono"),
+                            gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
         ),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False, height=240, margin=dict(l=40, r=40, t=20, b=20),
-        font=dict(color="#9a9a9a"),
+        font=dict(color="#9C8F7A"),
     )
     st.plotly_chart(fig, use_container_width=True, key=f"radar_{judul}")
 
@@ -597,10 +675,6 @@ def bobot_ekuitas(kandidat):
     hijau = [c for c in kandidat if c["tier"] == "kuat"]
     if not hijau:
         return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
-    # Gerbang eksekusi: volume ratio (momentum riil) DAN candle hari ini harus hijau
-    # (harga > open) -- volume besar di candle merah itu tanda distribusi/jual, bukan
-    # akumulasi, meski volume ratio-nya tinggi. Value tetap ditampilkan di kartu sebagai
-    # konteks likuiditas/"lirikan trader", tapi bukan syarat lolos.
     lolos = [c for c in hijau
              if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
              and c["m"]["candle_hijau"] is True
@@ -672,10 +746,19 @@ def tampilkan_screener():
     ihsg = status_ihsg_ringan(harga_now, tanggal_now)
     backtest = BACKTEST_HISTORIS
 
-    # --- Tahap 1 (ringkas, collapsed -- info penting ada di judul expander)
+    # --- Tahap 1: panel berjenjang (angka besar + label kecil) menggantikan
+    # baris "IHSG NORMALIZING · 6600 · +23.5%" yang disambung titik tengah.
     light, note = traffic_light(ihsg["fase"], backtest)
-    with st.expander(f"{light} IHSG {ihsg['fase']} · {ihsg['harga']:.0f} · {ihsg['pct_dari_trough']:+.1f}% dari bottom"):
-        st.caption(note)
+    fase_class = "karat" if ihsg["fase"] == "BEAR" else ""
+    st.markdown(f"""
+    <div class="rs-panel {fase_class}">
+      <div class="rs-label">{light} IHSG · {ihsg['fase']}</div>
+      <div class="rs-angka">{ihsg['harga']:,.0f}</div>
+      <div class="rs-sub">{ihsg['pct_dari_trough']:+.1f}% dari titik terendah</div>
+    </div>
+    """.replace(",", "."), unsafe_allow_html=True)
+    st.caption(note)
+    with st.expander("Detail backtest historis (7 episode sejak 2000)"):
         st.dataframe(
             [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
               "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
@@ -689,7 +772,6 @@ def tampilkan_screener():
         st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
         st.stop()
 
-    # --- ambil data universe (cuma kalau IHSG lagi ada siklus)
     with st.spinner("Menarik data saham universe..."):
         harga_map = ambil_universe(tuple(ALL_TICKERS))
 
@@ -698,19 +780,35 @@ def tampilkan_screener():
                   "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
         st.stop()
 
-    # --- Tahap 2 (ringkas, collapsed -- sektor teratas ada di judul expander)
+    # --- Tahap 2: panel berjenjang + bar horizontal ranking sektor, menggantikan
+    # daftar titik-titik "#1 Sektor — return% (n saham) · status".
     sektor = status_sektor(harga_map, ihsg["trough_date"])
     sektor_top = sektor[0]["sektor"] if sektor else "-"
-    with st.expander(f"🏆 Sektor teratas: {sektor_top} · {len(sektor)} sektor dipantau"):
-        st.caption(f"Referensi historis: sektor yang biasanya paling cepat bergerak di fase bottom-rebound "
-                  f"adalah {', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
-                  f"tapi pola tiap siklus bisa beda.")
+    st.markdown(f"""
+    <div class="rs-panel">
+      <div class="rs-label">🏆 Sektor teratas</div>
+      <div class="rs-angka" style="font-size:24px">{sektor_top}</div>
+      <div class="rs-sub">{len(sektor)} sektor dipantau</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if sektor:
+        max_ret = max(abs(s["return"]) for s in sektor) or 1
+        bars_html = ""
         for s in sektor:
-            status = "🟢 Sudah bergerak" if s["bergerak"] else "⚪ Belum bergerak"
-            st.write(f"**#{s['ranking']} {s['sektor']}** — {s['return']:+.1f}% ({s['n']} saham) · {status}")
+            lebar = min(100, abs(s["return"]) / max_ret * 100)
+            titik = "🟢" if s["bergerak"] else "⚪"
+            bars_html += f"""<div class="rs-sektor-row">
+              <span class="rs-sektor-nama">{titik} #{s['ranking']} {s['sektor']}</span>
+              <div class="rs-sektor-bar-bg"><div class="rs-sektor-bar-isi" style="width:{lebar:.0f}%"></div></div>
+              <span class="rs-sektor-nilai">{s['return']:+.1f}%</span>
+            </div>"""
+        st.markdown(bars_html, unsafe_allow_html=True)
+    with st.expander("Referensi historis sektor tercepat"):
+        st.caption(f"Sektor yang biasanya paling cepat bergerak di fase bottom-rebound adalah "
+                  f"{', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
+                  f"tapi pola tiap siklus bisa beda, lihat ranking live di atas.")
 
     ihsg_beta_series = ambil_ihsg_untuk_beta()
-
     sector_return_map = {s["sektor"]: s["return"] for s in sektor}
 
     # --- Tahap 3
@@ -747,9 +845,6 @@ def tampilkan_screener():
 
     kandidat.sort(key=lambda c: -c["skor"])
 
-    # Cek RSS negatif -- cuma untuk kandidat yang relevan (tier kuat/menunggu),
-    # bukan seluruh universe, biar tidak lambat. Ketemu -> exclude total (gerbang
-    # keras terpisah dari DER/beta/ukuran).
     with st.spinner("Cek berita terbaru untuk kandidat teratas..."):
         for c in kandidat:
             if c["tier"] in ("kuat", "menunggu"):
@@ -765,19 +860,19 @@ def tampilkan_screener():
     shown_menunggu = [c for c in kandidat if c["tier"] == "menunggu"]
 
     def render_kartu_kuat(c):
-        """Kartu Tier Kuat -- radar jadi elemen utama, minim teks. Detail lengkap
-        (gap/vol/candle/lari/value/penalti/RSS) dipadatkan ke satu expander kecil."""
+        """Kartu Tier Kuat -- radar jadi elemen utama, badge berwarna sesuai token
+        (amber = all-in, krem pudar = tahan/kandidat), bukan teks emoji polos."""
         if eq["pilihan"] == c["ticker"]:
-            badge_emoji, badge_txt = "🟢", "All-in"
+            badge_html = '<span class="rs-badge rs-badge-allin">● ALL-IN</span>'
         elif c["ticker"] in eq.get("menunggu", []):
-            badge_emoji, badge_txt = "🟡", "Cash ditahan"
+            badge_html = '<span class="rs-badge rs-badge-tahan">CASH DITAHAN</span>'
         else:
-            badge_emoji, badge_txt = "⚪", "Kandidat"
+            badge_html = '<span class="rs-badge rs-badge-kandidat">KANDIDAT</span>'
         m = c["m"]
         with st.container(border=True):
             col1, col2 = st.columns([2, 1])
             col1.markdown(f"### {c['ticker']}")
-            col2.markdown(f"<div style='text-align:right;padding-top:14px;font-size:14px'>{badge_emoji} {badge_txt}</div>",
+            col2.markdown(f"<div style='text-align:right;padding-top:14px'>{badge_html}</div>",
                           unsafe_allow_html=True)
             render_radar(hitung_dimensi_radar(c), c["ticker"])
             if eq["pilihan"] == c["ticker"]:
@@ -798,7 +893,6 @@ def tampilkan_screener():
                     st.caption("📡 Tidak ada berita ditemukan")
 
     def render_kartu_ringkas(c):
-        """Kartu Tier Menunggu Konfirmasi -- padat, tanpa radar (belum layak jadi fokus visual)."""
         m = c["m"]
         candle_txt = {True: "🟩", False: "🟥", None: "?"}[m["candle_hijau"]]
         with st.container(border=True):
@@ -824,11 +918,18 @@ def tampilkan_screener():
                 st.write(f"**{c['ticker']}** ({c['rss']['tanggal']})")
                 st.caption(c["rss"]["judul"])
 
-    # --- Tahap 4
+    # --- Tahap 4: panel berjenjang untuk status bobot ekuitas
     st.subheader("Tahap 4 — Bobot Ekuitas")
+    status_label = {"all_in": "All-in", "cash_ditahan": "Cash Ditahan", "cash_menganggur": "Cash Menganggur"}
     status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
-    st.write(f"{status_icon.get(eq['status'], '')} **{eq['status'].replace('_', ' ').title()}**")
-    st.caption(eq["detail"])
+    eq_class = "" if eq["status"] == "all_in" else ""
+    st.markdown(f"""
+    <div class="rs-panel {eq_class}">
+      <div class="rs-label">{status_icon.get(eq['status'], '')} Status</div>
+      <div class="rs-angka" style="font-size:22px">{status_label.get(eq['status'], eq['status'])}</div>
+      <div class="rs-sub">{eq['detail']}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # --- Manajemen Posisi Aktif (SL keras + trailing-lock + override regime)
     if posisi:
@@ -872,7 +973,6 @@ def tampilkan_screener():
             c3.metric("Trailing floor", f"{trailing_floor:.0f}" if trailing_floor else "belum aktif")
             st.write(f"**{rekom}**")
             st.caption(alasan)
-
 
     st.divider()
     st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
