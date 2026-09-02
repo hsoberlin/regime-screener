@@ -83,8 +83,10 @@ st.markdown("""
 .kartu-sl{color:#ff8f8f!important;font-weight:800}
 .kartu-wyckoff-siap{border-left:4px solid #c084fc}
 .kartu-wyckoff-pantau{border-left:4px solid #7c3aed;opacity:.88}
+.kartu-wyckoff-cek{border-left:4px solid #eab308;opacity:.92}
 .tag-wyckoff-siap{background:rgba(192,132,247,.18);color:#c084fc}
 .tag-wyckoff-pantau{background:rgba(124,58,237,.15);color:#a78bfa}
+.tag-wyckoff-cek{background:rgba(234,179,8,.18);color:#facc15}
 .macro-label{font-size:9px;color:#888;display:block;margin-bottom:2px;letter-spacing:1px}
 .macro-val-up{color:#00ffcc;font-weight:bold}
 .macro-val-down{color:#ff6b6b;font-weight:bold}
@@ -352,8 +354,11 @@ def metrik(kode, df, p_masuk, p_keluar):
     )
 
 
-def metrik_wyckoff(df, jendela=50, jendela_range=15):
+def metrik_wyckoff(df, jendela=150, jendela_range=15):
     """Prefilter re-akumulasi ala Wyckoff. Bukan sinyal masuk — cuma penyaring kandidat.
+
+    Jendela 150 hari (~7 bulan) — bukan 50 hari — supaya rally besar sebelum topping yang
+    genuinely butuh berbulan-bulan ikut tertangkap. Rally & turun dicari di window yang sama.
 
     Lima syarat (dicek di luar fungsi ini, di baris DataFrame):
         rally     : tertinggi jendela >= harga awal jendela x (1 + rally_min)
@@ -368,14 +373,14 @@ def metrik_wyckoff(df, jendela=50, jendela_range=15):
     H = sub["High"].values.astype(float)
     C = sub["Close"].values.astype(float)
 
-    tertinggi_50 = float(H.max())
+    tertinggi_puncak = float(H.max())
     idx_puncak = int(np.argmax(H))
     harga_awal = float(C[0])
     harga_now = float(C[-1])
     hari_sejak_puncak = (jendela - 1) - idx_puncak
 
-    rally_pct = (tertinggi_50 / harga_awal - 1) if harga_awal > 0 else np.nan
-    turun_pct = (harga_now / tertinggi_50 - 1) if tertinggi_50 > 0 else np.nan
+    rally_pct = (tertinggi_puncak / harga_awal - 1) if harga_awal > 0 else np.nan
+    turun_pct = (harga_now / tertinggi_puncak - 1) if tertinggi_puncak > 0 else np.nan
 
     sub15 = df.tail(jendela_range)
     low15min = float(sub15["Low"].min())
@@ -387,7 +392,7 @@ def metrik_wyckoff(df, jendela=50, jendela_range=15):
     vol_rasio_ma = (volma20 / volma50) if volma50 > 0 else np.nan
 
     return dict(
-        tertinggi_50=tertinggi_50, rally_pct=rally_pct, turun_pct=turun_pct,
+        tertinggi_puncak=tertinggi_puncak, rally_pct=rally_pct, turun_pct=turun_pct,
         hari_sejak_puncak=float(hari_sejak_puncak), range15_pct=range15_pct,
         vol_rasio_ma=vol_rasio_ma,
     )
@@ -576,7 +581,7 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
             if m:
                 w = metrik_wyckoff(df)
                 m.update(w if w else dict(
-                    tertinggi_50=np.nan, rally_pct=np.nan, turun_pct=np.nan,
+                    tertinggi_puncak=np.nan, rally_pct=np.nan, turun_pct=np.nan,
                     hari_sejak_puncak=np.nan, range15_pct=np.nan, vol_rasio_ma=np.nan))
                 baris.append(m)
         except Exception:
@@ -601,14 +606,18 @@ if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
             np.where((d["hari_sejak"].fillna(99) <= 2) & (d["lari"].fillna(9) < 0.05),
                      "MASIH OK", "TERTINGGAL")))
 
-        # --- Wyckoff SPRING: flag kelolosan lima syarat ---
-        d["rally_ok"] = d["rally_pct"] >= rally_min
-        d["turun_ok"] = d["turun_pct"] <= -turun_min
-        d["sideways_ok"] = d["hari_sejak_puncak"] >= sideways_min_hari
-        d["range_ok"] = d["range15_pct"] <= range_maks
-        d["volume_ok"] = d["vol_rasio_ma"] >= volume_mult
-        d["lolos_wyckoff"] = (d[["rally_ok", "turun_ok", "sideways_ok", "range_ok", "volume_ok"]]
-                              .fillna(False).all(axis=1))
+        # --- Wyckoff SPRING: flag kelolosan per syarat (NaN dianggap gagal) ---
+        d["rally_ok"] = d["rally_pct"].fillna(-999) >= rally_min
+        d["turun_ok"] = d["turun_pct"].fillna(999) <= -turun_min
+        d["sideways_ok"] = d["hari_sejak_puncak"].fillna(-999) >= sideways_min_hari
+        d["range_ok"] = d["range15_pct"].fillna(999) <= range_maks
+        d["volume_ok"] = d["vol_rasio_ma"].fillna(-999) >= volume_mult
+
+        # empat syarat dasar (struktur harga) wajib semua; volume MENENTUKAN TIER, bukan gerbang tunggal
+        dasar_ok = d["rally_ok"] & d["turun_ok"] & d["sideways_ok"] & d["range_ok"]
+        d["tier_siap"] = dasar_ok & d["volume_ok"]          # absorption klasik: volume ramai
+        d["tier_cek_broker"] = dasar_ok & (~d["volume_ok"])  # quiet accumulation: volume sepi, cek broker flow manual
+        d["lolos_wyckoff"] = dasar_ok  # dipakai kalau perlu gabungan kedua tier
 
         # --- Wyckoff SPRING: ukuran unit pakai ekuitas/kas SPRING, terpisah dari OBERLIN ---
         d["unit_lot_spring"] = d["N"].apply(lambda n: ukuran_unit(ekuitas_spring, n, risiko))
@@ -734,26 +743,40 @@ def kartu(sub, kas_bebas):
     return "".join(blok)
 
 
-def kartu_wyckoff(sub, siap):
-    """Kartu watchlist SPRING — status siap (sudah tembus) atau pantau (belum tembus)."""
+def kartu_wyckoff(sub, status):
+    """Kartu watchlist SPRING.
+
+    status: "siap_tembus" | "siap_pantau" | "cek_broker"
+        siap_*      -> tier SIAP (5/5 syarat termasuk volume tinggi, absorption klasik)
+        cek_broker  -> tier volume sepi (4/5 syarat, quiet accumulation) -- wajib cek
+                       gauge Broker Action (Big Dist <-> Big Acc) di Stockbit manual
+                       sebelum dianggap kandidat, berapa pun status tembusnya.
+    """
     rp = lambda v: f"{v:,.0f}".replace(",", ".")
-    kelas = "kartu-wyckoff-siap" if siap else "kartu-wyckoff-pantau"
-    tag = "tag-wyckoff-siap" if siap else "tag-wyckoff-pantau"
+    gaya = {
+        "siap_tembus": ("kartu-wyckoff-siap", "tag-wyckoff-siap", "SUDAH TEMBUS"),
+        "siap_pantau": ("kartu-wyckoff-siap", "tag-wyckoff-siap", "BELUM TEMBUS"),
+        "cek_broker": ("kartu-wyckoff-cek", "tag-wyckoff-cek", "CEK BROKER FLOW"),
+    }
+    kelas, tag, label_dasar = gaya[status]
     blok = []
     for _, r in sub.iterrows():
         muat = ("" if r["muat_spring"] == "YA"
                 else " <span style='color:#ff8f8f'>&middot; TIDAK MUAT KAS SPRING</span>")
-        if siap:
-            status = "TEMBUS HARI INI" if r.get("hari_sejak") == 0 else "SUDAH TEMBUS"
+        if status == "siap_tembus":
+            status_teks = "TEMBUS HARI INI" if r.get("hari_sejak") == 0 else label_dasar
+        elif status == "cek_broker":
+            tembus_teks = "sudah tembus" if r.get("tembus") else "belum tembus"
+            status_teks = f"{label_dasar} &middot; {tembus_teks}"
         else:
-            status = "BELUM TEMBUS"
+            status_teks = label_dasar
         blok.append(f"""<div class="kartu {kelas}">
   <div class="kartu-kepala">
     <span class="kartu-kode">{r['kode']}</span>
-    <span class="kartu-tag {tag}">{status}</span>
+    <span class="kartu-tag {tag}">{status_teks}</span>
   </div>
   <div class="kartu-baris">
-    Harga <b>{rp(r['harga'])}</b> &middot; puncak50 <b>{rp(r['tertinggi_50'])}</b>
+    Harga <b>{rp(r['harga'])}</b> &middot; puncak150 <b>{rp(r['tertinggi_puncak'])}</b>
     (rally +{r['rally_pct']*100:.0f}% &middot; turun {r['turun_pct']*100:.0f}%)<br>
     Sideways <b>{int(r['hari_sejak_puncak'])} hari</b> &middot;
     range15H <b>{r['range15_pct']*100:.1f}%</b> &middot;
@@ -847,54 +870,72 @@ with tab1:
 
 with tab2:
     st.markdown(f"""<div class="aturan" style="border-left-color:#a855f7">
-    <b>Dua tahap, bukan satu keputusan.</b> Saham harus lolos lima syarat Wyckoff DULU (re-akumulasi),
-    baru dicek sinyal Turtle. Watchlist di bawah bukan rekomendasi beli — cuma daftar kandidat yang
-    strukturnya cocok. Ekuitas dan kas di sini SPRING (akun FUNDAMENTAL), terpisah dari OBERLIN.<br>
-    <b>Syarat lolos:</b> rally &ge;{rally_min*100:.0f}% sebelum puncak (jendela 50 hari) &middot;
-    turun &ge;{turun_min*100:.0f}% dari puncak &middot; sideways &ge;{sideways_min_hari} hari &middot;
-    range 15H &le;{range_maks*100:.0f}% &middot; volume MA20 &ge;{volume_mult:.1f}x MA50
+    <b>Dua tahap, bukan satu keputusan.</b> Saham harus lolos empat syarat struktur harga Wyckoff DULU
+    (re-akumulasi), baru dicek sinyal Turtle. Watchlist di bawah bukan rekomendasi beli — cuma daftar
+    kandidat yang strukturnya cocok. Ekuitas dan kas di sini SPRING (akun FUNDAMENTAL), terpisah dari
+    OBERLIN.<br>
+    <b>Syarat struktur (wajib semua):</b> rally &ge;{rally_min*100:.0f}% sebelum puncak (jendela 150 hari)
+    &middot; turun &ge;{turun_min*100:.0f}% dari puncak &middot; sideways &ge;{sideways_min_hari} hari
+    &middot; range 15H &le;{range_maks*100:.0f}%<br>
+    <b>Volume MA20 &ge;{volume_mult:.1f}x MA50 menentukan TIER, bukan gerbang lolos/gagal:</b>
+    volume tinggi &rarr; tier SIAP (absorption klasik). Volume rendah &rarr; tier CEK BROKER FLOW
+    (bisa jadi quiet accumulation — big player ngumpulin barang tanpa bikin volume meledak, wajib
+    dikonfirmasi manual lewat gauge Broker Action di Stockbit sebelum dianggap kandidat).
     </div>""", unsafe_allow_html=True)
 
-    watchlist = d[d["lolos_wyckoff"] == True].copy()
+    siap = d[d["tier_siap"]].copy()
+    cek_broker = d[d["tier_cek_broker"]].copy()
 
-    if watchlist.empty:
+    if siap.empty and cek_broker.empty:
         st.markdown('<div class="kosong"><div class="kosong-judul">TIDAK ADA KANDIDAT</div>'
-                    '<div class="kosong-sub">Tidak ada saham yang lolos kelima syarat Wyckoff hari ini.'
-                    '<br>Ini keadaan normal — coba longgarkan ambang di sidebar kalau mau lihat lebih '
-                    'banyak, atau tunggu hari lain.</div></div>', unsafe_allow_html=True)
+                    '<div class="kosong-sub">Tidak ada saham yang lolos empat syarat struktur Wyckoff '
+                    'hari ini.<br>Ini keadaan normal — coba longgarkan ambang di sidebar kalau mau lihat '
+                    'lebih banyak, atau tunggu hari lain.</div></div>', unsafe_allow_html=True)
     else:
-        siap = watchlist[watchlist["tembus"]].sort_values("lari")
-        pantau = watchlist[~watchlist["tembus"]].sort_values("jarak", ascending=False)
+        siap_tembus = siap[siap["tembus"]].sort_values("lari")
+        siap_pantau = siap[~siap["tembus"]].sort_values("jarak", ascending=False)
 
         st.markdown(f"<h3 style='font-family:Orbitron;color:#c084fc;font-size:16px;letter-spacing:2px'>"
-                    f"SUDAH TEMBUS — BOLEH MASUK &nbsp;—&nbsp; {len(siap)} SAHAM</h3>",
+                    f"SIAP — SUDAH TEMBUS &nbsp;—&nbsp; {len(siap_tembus)} SAHAM</h3>",
                     unsafe_allow_html=True)
-        if siap.empty:
-            st.info("Belum ada kandidat watchlist yang sekaligus tembus tertinggi 20 hari hari ini.")
+        if siap_tembus.empty:
+            st.info("Belum ada kandidat tier SIAP yang sekaligus tembus tertinggi 20 hari hari ini.")
         else:
-            st.markdown(kartu_wyckoff(siap, siap=True), unsafe_allow_html=True)
-            muat_s = siap[siap["muat_spring"] == "YA"]
-            st.caption(f"{len(muat_s)} dari {len(siap)} muat di kas SPRING Rp{kas_spring:,.0f}"
+            st.markdown(kartu_wyckoff(siap_tembus, "siap_tembus"), unsafe_allow_html=True)
+            muat_s = siap_tembus[siap_tembus["muat_spring"] == "YA"]
+            st.caption(f"{len(muat_s)} dari {len(siap_tembus)} muat di kas SPRING Rp{kas_spring:,.0f}"
                        .replace(",", "."))
 
         st.markdown(f"<h3 style='font-family:Orbitron;color:#7c3aed;font-size:16px;letter-spacing:2px;"
-                    f"margin-top:22px'>PANTAU — BELUM TEMBUS &nbsp;—&nbsp; {len(pantau)} SAHAM</h3>",
+                    f"margin-top:22px'>SIAP — PANTAU, BELUM TEMBUS &nbsp;—&nbsp; {len(siap_pantau)} SAHAM</h3>",
                     unsafe_allow_html=True)
-        if pantau.empty:
-            st.info("Tidak ada kandidat lain yang masih menunggu tembus.")
+        if siap_pantau.empty:
+            st.info("Tidak ada kandidat tier SIAP lain yang masih menunggu tembus.")
         else:
-            st.markdown(kartu_wyckoff(pantau, siap=False), unsafe_allow_html=True)
+            st.markdown(kartu_wyckoff(siap_pantau, "siap_pantau"), unsafe_allow_html=True)
 
+        st.markdown(f"<h3 style='font-family:Orbitron;color:#eab308;font-size:16px;letter-spacing:2px;"
+                    f"margin-top:22px'>CEK BROKER FLOW — VOLUME SEPI &nbsp;—&nbsp; {len(cek_broker)} SAHAM</h3>",
+                    unsafe_allow_html=True)
+        st.caption("Struktur harga cocok, tapi volume di bawah ambang. Bisa quiet accumulation, bisa juga "
+                   "memang sepi peminat. Cek gauge Broker Action (Big Dist <-> Big Acc) di Stockbit untuk "
+                   "tiap kode sebelum menganggap ini kandidat sungguhan.")
+        if cek_broker.empty:
+            st.info("Tidak ada kandidat di tier ini hari ini.")
+        else:
+            st.markdown(kartu_wyckoff(cek_broker, "cek_broker"), unsafe_allow_html=True)
+
+        gabungan = pd.concat([siap, cek_broker])
         st.download_button("Unduh watchlist Wyckoff SPRING (CSV)",
-                           watchlist.to_csv(index=False).encode(),
+                           gabungan.to_csv(index=False).encode(),
                            f"wyckoff_spring_{datetime.now(WIB).strftime('%Y%m%d')}.csv", "text/csv",
                            key="dl_wyckoff")
 
     st.markdown("""<div class="catatan" style="border-left-color:#a855f7">
-    <b>Ini prefilter mekanis, bukan konfirmasi visual.</b> Lima syarat di atas tidak bisa membedakan
-    re-akumulasi asli dari distribusi terselubung — itu kerjanya mata, bukan rumus. Cek chart tiap
-    kandidat sebelum masuk, terutama yang levelnya (tertinggi 20H / terendah 10H) berdekatan dengan
-    harga sekarang.<br><br>
+    <b>Ini prefilter mekanis, bukan konfirmasi visual.</b> Empat syarat struktur di atas tidak bisa
+    membedakan re-akumulasi asli dari distribusi terselubung — itu kerjanya mata, bukan rumus. Cek chart
+    tiap kandidat sebelum masuk, terutama yang levelnya (tertinggi 20H / terendah 10H) berdekatan dengan
+    harga sekarang. Untuk tier CEK BROKER FLOW, wajib cek gauge Broker Action di Stockbit dulu.<br><br>
     <b>Sizing bukan aturan wajib.</b> Angka "usulan (referensi)" di tiap kartu dihitung dari rumus lama
     (1% ekuitas SPRING ÷ N), tapi keputusan berapa lot yang dibeli sekarang murni insting kamu.
     Wajib dicatat di jurnal: lot rekomendasi aplikasi, lot aktual dibeli, dan alasan bobotnya
