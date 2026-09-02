@@ -1,258 +1,304 @@
 """
-TURTLE BOARD
-============
-Pemindai Donchian 20 hari + kalkulator ukuran Unit (N) untuk Bursa Efek Indonesia.
+REGIME SCREENER
+===============
+Deteksi fase siklus IHSG (BEAR / BOTTOM-REBOUND / NORMALIZING) + pemburu saham
+laggard sektor, dengan bobot ekuitas Rp20 juta all-in ke satu kandidat terbaik.
 
-Aturan asli Turtle System 1 (Dennis & Eckhardt):
-    N          = Wilder smoothing 20 hari dari True Range
-    1 Unit     = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot
-    Masuk      = penutupan menembus tertinggi 20 hari sebelumnya
-    Stop Loss  = harga masuk - 2N   (rugi 1 unit = 2 x risiko%)
-    Tambah     = tiap naik 0,5N, maksimum 4 unit per saham
-    Keluar     = penutupan di bawah terendah 10 hari sebelumnya
-    Batas      = 4 per saham, 6 grup berkorelasi, 10 sektor, 12 satu arah
-    TIDAK ADA take profit. TIDAK ADA batas waktu tahan. TIDAK ADA skor.
+4 tahap:
+    1. Status IHSG   -- fase siklus + backtest probabilitas historis (7 episode sejak 2000)
+    2. Status Sektor -- return tiap sektor sejak titik bottom IHSG terakhir
+    3. Kandidat Emiten -- gerbang keras -> skor -> tier, dalam sektor yang sudah bergerak
+    4. Bobot Ekuitas -- all-in / tie-breaker / cash ditahan / cash menganggur
 
-Dua tambahan di luar buku, wajib untuk IDX tanpa margin:
-    - saringan likuiditas (transaksi harian TERKECIL 20 hari)
-    - batas kas (nilai posisi tidak boleh melebihi kas)
+Tema visual: identitas terpisah dari Turtle Board (Opsi B, disetujui 1 Sep 2026).
+Dasar hangat/gelap + aksen amber redup, bukan neon -- radar chart jadi elemen
+utama tiap kartu kandidat. Space Grotesk untuk judul/ticker, IBM Plex Mono
+untuk angka -- sengaja beda font dari Orbitron/JetBrains Mono-nya Turtle Board
+supaya dua app ini terasa sebagai dua alat yang beda karakter meski satu keluarga.
 
-Jalankan:  streamlit run turtle_board.py
-Kebutuhan: streamlit yfinance pandas numpy requests
+Jalankan:  streamlit run app.py
+Kebutuhan: streamlit yfinance pandas numpy plotly requests
 """
-
-import warnings
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
+from datetime import datetime
 
-try:
-    import requests
-    ADA_REQ = True
-except Exception:
-    ADA_REQ = False
-
-warnings.filterwarnings("ignore")
-st.set_page_config(page_title="TURTLE BOARD", layout="wide")
-
-WIB = timezone(timedelta(hours=7))
+st.set_page_config(page_title="Regime Screener", layout="centered")
 
 # =====================================================================
-# TAMPILAN
+# TEMA VISUAL -- Opsi B: identitas terpisah dari Turtle Board
 # =====================================================================
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@500;800&family=Inter:wght@400;600&display=swap');
-.stApp { background-color:#020406; color:#fff; }
-.header-container{padding:14px;background:rgba(0,255,204,.02);border-radius:10px;
-  border:1px solid rgba(0,255,204,.1);text-align:center;margin-bottom:14px}
-.header-title{font-family:'Orbitron',sans-serif!important;font-weight:900;font-size:32px!important;
-  background:linear-gradient(90deg,#00ffcc,#3d7fff);-webkit-background-clip:text;
-  -webkit-text-fill-color:transparent;letter-spacing:5px}
-.header-sub{font-family:'JetBrains Mono';font-size:10px;color:#7c8a94;letter-spacing:2px;margin-top:4px}
-.macro-strip{display:flex;justify-content:space-around;background:#0a0e14;padding:9px;
-  border-radius:5px;border:1px solid #333;margin-bottom:14px;flex-wrap:wrap;gap:6px}
-.macro-item{font-family:'JetBrains Mono';font-size:12px;text-align:center;
-  padding:6px 10px;border-radius:6px;border:1px solid transparent;min-width:104px}
-.macro-up{background:rgba(0,255,204,.09);border-color:rgba(0,255,204,.35)}
-.macro-down{background:rgba(255,92,92,.09);border-color:rgba(255,92,92,.35)}
-.macro-utama{min-width:150px;padding:6px 14px}
-.macro-utama .macro-label{font-size:11px!important;letter-spacing:2px}
-.macro-utama .macro-val-up,.macro-utama .macro-val-down{font-size:17px}
-/* --- kartu tampilan HP --- */
-.kartu{background:#0a0e14;border:1px solid #2a3038;border-radius:8px;
-  padding:11px 13px;margin-bottom:9px}
-.kartu-segar{border-left:4px solid #00ffcc}
-.kartu-ok{border-left:4px solid #3d7fff}
-.kartu-tinggal{border-left:4px solid #ffb400}
-.kartu-kepala{display:flex;justify-content:space-between;align-items:baseline;
-  margin-bottom:7px;flex-wrap:wrap;gap:4px}
-.kartu-kode{font-family:'Orbitron';font-size:17px;font-weight:900;color:#fff;letter-spacing:1px}
-.kartu-tag{font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;
-  padding:2px 8px;border-radius:10px}
-.tag-segar{background:rgba(0,255,204,.15);color:#00ffcc}
-.tag-ok{background:rgba(61,127,255,.15);color:#7fa8ff}
-.tag-tinggal{background:rgba(255,180,0,.15);color:#ffc94d}
-.kartu-baris{font-family:'JetBrains Mono';font-size:11.5px;color:#c3ced6;
-  line-height:1.85;border-top:1px solid #1c2229;padding-top:5px}
-.kartu-baris b{color:#fff}
-.kartu-unit{color:#00ffcc!important;font-weight:800}
-.kartu-sl{color:#ff8f8f!important;font-weight:800}
-.kartu-wyckoff-siap{border-left:4px solid #c084fc}
-.kartu-wyckoff-pantau{border-left:4px solid #7c3aed;opacity:.88}
-.kartu-wyckoff-cek{border-left:4px solid #eab308;opacity:.92}
-.tag-wyckoff-siap{background:rgba(192,132,247,.18);color:#c084fc}
-.tag-wyckoff-pantau{background:rgba(124,58,237,.15);color:#a78bfa}
-.tag-wyckoff-cek{background:rgba(234,179,8,.18);color:#facc15}
-.macro-label{font-size:9px;color:#888;display:block;margin-bottom:2px;letter-spacing:1px}
-.macro-val-up{color:#00ffcc;font-weight:bold}
-.macro-val-down{color:#ff6b6b;font-weight:bold}
-.kosong{background:rgba(10,14,20,.9);border:1px solid #2a3038;border-radius:8px;
-  padding:34px 20px;text-align:center;margin:18px 0}
-.kosong-judul{font-family:'Orbitron';font-size:20px;color:#7c8a94;letter-spacing:3px}
-.kosong-sub{font-family:'Inter';font-size:12px;color:#5a666e;margin-top:10px;line-height:1.7}
-.aturan{background:rgba(2,20,20,.5);border-left:2px solid #00ffcc;padding:11px 14px;
-  border-radius:4px;font-family:'Inter';font-size:11.5px;color:#c9d3d8;line-height:1.65}
-.aturan b{color:#fff}
-.catatan{background:rgba(255,180,0,.05);border-left:2px solid #ffb400;padding:9px 12px;
-  border-radius:4px;font-family:'Inter';font-size:11px;color:#c9d3d8;margin-bottom:12px}
-[data-testid="stDataFrame"]{border:1px solid #333!important}
-[data-testid="stDataFrame"] div[role="columnheader"]{background:#0a0e14!important;color:#00ffcc!important;
-  font-family:'Orbitron'!important;font-weight:800!important;border-bottom:1px solid #444!important}
-[data-testid="stDataFrame"] div[role="gridcell"]{background:#020406!important;color:#e0e0e0!important;
-  font-family:'JetBrains Mono'!important;border-bottom:1px solid #222!important}
-section[data-testid="stSidebar"]{background:#060a0f;border-right:1px solid #222}
-/* --- keterbacaan: paksa teks terang di seluruh komponen --- */
-.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div{color:#e8edf0}
-/* warna makro TIDAK boleh ditimpa aturan keterbacaan di atas */
-.macro-val-up, .stApp .macro-val-up, .stApp div.macro-val-up{color:#00ffcc!important}
-.macro-val-down, .stApp .macro-val-down, .stApp div.macro-val-down{color:#ff5c5c!important}
-.macro-label, .stApp .macro-label{color:#8b98a3!important}
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p{color:#9fb0bb!important}
-[data-testid="stMarkdownContainer"] p{color:#e8edf0}
-.stAlert, .stAlert p{color:#e8edf0!important}
-section[data-testid="stSidebar"] *{color:#dfe7ec!important}
-section[data-testid="stSidebar"] .stSlider label,
-section[data-testid="stSidebar"] .stNumberInput label,
-section[data-testid="stSidebar"] .stRadio label,
-section[data-testid="stSidebar"] .stSelectbox label{color:#00ffcc!important;font-weight:600}
-input, textarea, select{color:#ffffff!important;background:#0d1319!important}
-[data-baseweb="select"] div{color:#ffffff!important}
-/* --- layar sempit (HP) --- */
-@media (max-width:820px){
-  .header-title{font-size:22px!important;letter-spacing:2px}
-  .header-sub{font-size:8px;letter-spacing:1px}
-  .macro-strip{gap:4px;padding:6px}
-  .macro-item{font-size:10px;min-width:31%}
-  .macro-label{font-size:8px}
-  .aturan{font-size:11px;line-height:1.75}
-  .catatan{font-size:10.5px}
-  .kosong{padding:24px 12px}
-  .kosong-judul{font-size:15px;letter-spacing:2px}
-  .kosong-sub{font-size:11px}
-  .block-container{padding-left:.6rem!important;padding-right:.6rem!important}
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg: #15110C;
+  --card: #1F1811;
+  --card-line: #2A2118;
+  --amber: #B8823D;
+  --karat: #8B4539;
+  --text: #E8DFD3;
+  --text-dim: #9C8F7A;
 }
+
+.stApp { background-color: var(--bg); }
+.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div { color: var(--text); }
+
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+  font-family: 'Space Grotesk', sans-serif !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.3px;
+  color: var(--text) !important;
+}
+
+[data-testid="stMetricValue"], .stCaptionContainer, .stCaptionContainer p,
+code, .stMarkdown code {
+  font-family: 'IBM Plex Mono', monospace !important;
+}
+.stCaptionContainer, .stCaptionContainer p { color: var(--text-dim) !important; }
+
+/* --- panel status berjenjang: angka besar + label kecil, bukan baris titik-titik --- */
+.rs-panel {
+  padding: 16px 20px;
+  border-radius: 6px;
+  background: var(--card);
+  border-left: 3px solid var(--amber);
+  margin-bottom: 10px;
+}
+.rs-panel.karat { border-left-color: var(--karat); }
+.rs-label {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px; font-weight: 700; letter-spacing: 2px;
+  color: var(--amber); margin-bottom: 6px; text-transform: uppercase;
+}
+.rs-panel.karat .rs-label { color: var(--karat); }
+.rs-angka {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 32px; font-weight: 600; color: var(--text); line-height: 1.1;
+}
+.rs-sub {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px; color: var(--text-dim); margin-top: 5px;
+}
+
+/* --- ranking sektor: bar horizontal, bukan daftar titik-titik --- */
+.rs-sektor-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.rs-sektor-nama {
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px;
+  width: 168px; flex-shrink: 0; color: var(--text);
+}
+.rs-sektor-bar-bg {
+  flex: 1; background: var(--card-line); border-radius: 3px;
+  height: 14px; overflow: hidden;
+}
+.rs-sektor-bar-isi { background: var(--amber); height: 100%; opacity: 0.85; }
+.rs-sektor-nilai {
+  font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+  width: 58px; text-align: right; color: var(--text-dim); flex-shrink: 0;
+}
+
+/* --- badge status kandidat --- */
+.rs-badge {
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+  padding: 3px 11px; border-radius: 10px; letter-spacing: 0.5px;
+  display: inline-block;
+}
+.rs-badge-allin {
+  background: rgba(184,130,61,0.18); color: var(--amber);
+  border: 1px solid rgba(184,130,61,0.45);
+}
+.rs-badge-tahan {
+  background: rgba(232,223,211,0.06); color: var(--text-dim);
+  border: 1px solid rgba(232,223,211,0.15);
+}
+.rs-badge-kandidat {
+  background: transparent; color: var(--text-dim);
+  border: 1px solid rgba(232,223,211,0.1);
+}
+
+/* --- kartu kandidat: container native streamlit, diwarnai ulang --- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--card) !important;
+  border-color: var(--card-line) !important;
+  border-radius: 8px !important;
+}
+
+section[data-testid="stSidebar"] { background: #100D09; border-right: 1px solid var(--card-line); }
+section[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+[data-testid="stMetricLabel"] { color: var(--text-dim) !important; }
+[data-testid="stMetricValue"] { color: var(--text) !important; font-family: 'IBM Plex Mono', monospace !important; }
+[data-testid="stMetricDelta"] { font-family: 'IBM Plex Mono', monospace !important; }
+
+.stButton button {
+  background: var(--card) !important; color: var(--amber) !important;
+  border: 1px solid rgba(184,130,61,0.35) !important;
+  font-family: 'Space Grotesk', sans-serif !important; font-weight: 600 !important;
+}
+.stButton button:hover { border-color: var(--amber) !important; }
+
+[data-testid="stExpander"] { border-color: var(--card-line) !important; background: var(--card) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # =====================================================================
-# PETA GRUP DAN SEKTOR  (untuk batas korelasi, bukan untuk memilih saham)
+# UNIVERSE -- basket representatif per sektor (bukan 840 emiten penuh)
 # =====================================================================
-MASTER_AFILIASI = {
-    "BREN": "PRAJOGO", "TPIA": "PRAJOGO", "CUAN": "PRAJOGO", "BRPT": "PRAJOGO",
-    "PTRO": "PRAJOGO", "CGAS": "PRAJOGO", "CDIA": "PRAJOGO", "GZCO": "PRAJOGO",
-    "BUMI": "BAKRIE", "BRMS": "BAKRIE", "ENRG": "BAKRIE", "DEWA": "BAKRIE",
-    "BNBR": "BAKRIE", "UNSP": "BAKRIE", "VIVA": "BAKRIE", "MDIA": "BAKRIE",
-    "JGLE": "BAKRIE", "ALII": "BAKRIE", "ELTY": "BAKRIE", "BTEL": "BAKRIE", "VKTR": "BAKRIE",
-    "AMMN": "SALIM", "INDF": "SALIM", "ICBP": "SALIM", "LSIP": "SALIM", "SIMP": "SALIM",
-    "META": "SALIM", "ROTI": "SALIM", "IMAS": "SALIM", "DNET": "SALIM", "MEDC": "SALIM",
-    "DSSA": "SINAR MAS", "BSDE": "SINAR MAS", "INKP": "SINAR MAS", "TKIM": "SINAR MAS",
-    "SMMA": "SINAR MAS", "DUTI": "SINAR MAS", "SMAR": "SINAR MAS", "FREN": "SINAR MAS",
-    "DMAS": "SINAR MAS",
-    "PANI": "AGUAN", "MKPI": "AGUAN", "ASRI": "AGUAN", "CBDK": "AGUAN",
-    "ADRO": "BOY THOHIR", "ADMR": "BOY THOHIR", "ESSA": "BOY THOHIR",
-    "MBMA": "BOY THOHIR", "MDKA": "BOY THOHIR",
-    "DRMA": "TP RACHMAT", "TAPG": "TP RACHMAT", "DSNG": "TP RACHMAT",
-    "ASSA": "TP RACHMAT", "ASLC": "TP RACHMAT",
-    "RAJA": "HAPSORO", "CBRE": "HAPSORO", "PSAB": "HAPSORO", "MINA": "HAPSORO", "OASA": "HAPSORO",
-    "JIHD": "TOMY WINATA", "SCBD": "TOMY WINATA", "TINY": "TOMY WINATA",
-    "KPIG": "MNC", "BHIT": "MNC", "MNCN": "MNC", "IPTV": "MNC", "BABP": "MNC", "BCAP": "MNC",
-    "LPKR": "LIPPO", "LPPF": "LIPPO", "MLPL": "LIPPO", "MPPA": "LIPPO",
-    "SILO": "LIPPO", "LPCK": "LIPPO", "MLPT": "LIPPO",
-    "GOTO": "TECH", "BUKA": "TECH", "ARTO": "TECH", "EMTK": "EMTEK", "SCMA": "EMTEK",
-    "BBRI": "BUMN", "BMRI": "BUMN", "BBNI": "BUMN", "BBTN": "BUMN", "BRIS": "BUMN",
-    "TLKM": "BUMN", "ANTM": "BUMN", "PTBA": "BUMN", "TINS": "BUMN", "PGAS": "BUMN",
-    "SMGR": "BUMN", "JSMR": "BUMN", "PGEO": "BUMN", "MTEL": "BUMN",
-    "WIKA": "BUMN KARYA", "PTPP": "BUMN KARYA", "ADHI": "BUMN KARYA",
-    "WTON": "BUMN KARYA", "WEGE": "BUMN KARYA", "PPRE": "BUMN KARYA",
-    "ASII": "ASTRA", "UNTR": "ASTRA", "AALI": "ASTRA", "ASGR": "ASTRA", "AUTO": "ASTRA",
-    "BBCA": "DJARUM", "TOWR": "DJARUM", "SUPR": "DJARUM",
-    "PNBN": "PANIN", "PNIN": "PANIN", "PNLF": "PANIN", "CFIN": "PANIN",
-    "AMRT": "ALFAMART", "MIDI": "ALFAMART", "BUDI": "SUNGAI BUDI", "TBLA": "SUNGAI BUDI",
-    "MEGA": "CT CORP", "BBHI": "CT CORP",
-    "SRTG": "SARATOGA", "TBIG": "SARATOGA", "MPMX": "SARATOGA",
+SECTOR_BASKETS = {
+    "Barang Baku": ["TPIA", "INTP", "SMGR", "INKP", "ANTM", "INCO", "MDKA",
+                    "TINS", "MBMA", "BRPT", "ESSA"],
+    "Energi": ["MEDC", "PGAS", "ADRO", "PTBA", "ITMG", "AKRA",
+               "HRUM", "INDY", "ELSA", "ADMR"],
+    "Perindustrian": ["ASII", "UNTR", "HEXA", "AUTO",
+                       "PTRO", "ASGR", "DRMA"],
+    "Keuangan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS",
+                 "BJBR", "BJTM", "BNGA", "NISP"],
+    "Konsumer Siklikal": ["MAPI", "ACES", "LPPF", "ERAA",
+                          "MYOR", "MIDI", "MAPA"],
+    "Properti": ["BSDE", "CTRA", "PWON", "SMRA",
+                 "ASRI", "DILD", "APLN"],
+    "Kesehatan": ["KLBF", "HEAL", "MIKA", "SIDO"],  # lapis 2 kesehatan terbatas, belum ditambah
 }
-
-SECTOR_MAP = {
-    "BBCA": "FINANCE", "BBRI": "FINANCE", "BMRI": "FINANCE", "BBNI": "FINANCE",
-    "BBTN": "FINANCE", "BRIS": "FINANCE", "ARTO": "FINANCE", "BJBR": "FINANCE",
-    "BJTM": "FINANCE", "TUGU": "FINANCE", "PNBN": "FINANCE", "BDMN": "FINANCE",
-    "BBHI": "FINANCE", "SRTG": "FINANCE", "ADMF": "FINANCE", "BNGA": "FINANCE",
-    "BNII": "FINANCE", "NISP": "FINANCE",
-    "ADRO": "ENERGY", "PTBA": "ENERGY", "ITMG": "ENERGY", "BYAN": "ENERGY",
-    "HRUM": "ENERGY", "INDY": "ENERGY", "MEDC": "ENERGY", "ELSA": "ENERGY",
-    "PGAS": "ENERGY", "AKRA": "ENERGY", "DOID": "ENERGY", "BUMI": "ENERGY",
-    "ENRG": "ENERGY", "RAJA": "ENERGY", "ADMR": "ENERGY", "GEMS": "ENERGY",
-    "BSSR": "ENERGY", "PGEO": "ENERGY", "TOBA": "ENERGY",
-    "ANTM": "BASIC-MAT", "MDKA": "BASIC-MAT", "INCO": "BASIC-MAT", "TINS": "BASIC-MAT",
-    "MBMA": "BASIC-MAT", "NCKL": "BASIC-MAT", "BRMS": "BASIC-MAT", "PSAB": "BASIC-MAT",
-    "INKP": "BASIC-MAT", "TKIM": "BASIC-MAT", "SMGR": "BASIC-MAT", "INTP": "BASIC-MAT",
-    "TPIA": "BASIC-MAT", "BRPT": "BASIC-MAT", "ESSA": "BASIC-MAT", "LTLS": "BASIC-MAT",
-    "AMMN": "BASIC-MAT", "ARCI": "BASIC-MAT", "HRTA": "BASIC-MAT",
-    "TLKM": "INFRA", "ISAT": "INFRA", "EXCL": "INFRA", "FREN": "INFRA", "JSMR": "INFRA",
-    "TBIG": "INFRA", "TOWR": "INFRA", "MTEL": "INFRA", "META": "INFRA", "PPRE": "INFRA",
-    "ADHI": "INFRA", "WIKA": "INFRA", "PTPP": "INFRA",
-    "ICBP": "CONSUMER", "INDF": "CONSUMER", "UNVR": "CONSUMER", "MYOR": "CONSUMER",
-    "AMRT": "CONSUMER", "MIDI": "CONSUMER", "ACES": "CONSUMER", "MAPI": "CONSUMER",
-    "MAPA": "CONSUMER", "CPIN": "CONSUMER", "JPFA": "CONSUMER", "GGRM": "CONSUMER",
-    "HMSP": "CONSUMER", "KLBF": "CONSUMER", "SIDO": "CONSUMER", "AUTO": "CONSUMER",
-    "ASII": "CONSUMER", "ERAA": "CONSUMER",
-    "BSDE": "PROPERTY", "CTRA": "PROPERTY", "SMRA": "PROPERTY", "PWON": "PROPERTY",
-    "ASRI": "PROPERTY", "DILD": "PROPERTY", "PANI": "PROPERTY", "APLN": "PROPERTY",
-    "LPCK": "PROPERTY", "LPKR": "PROPERTY", "BEST": "PROPERTY", "DMAS": "PROPERTY",
-    "GOTO": "TECH", "BUKA": "TECH", "EMTK": "TECH", "SCMA": "TECH", "WIRG": "TECH",
-    "DCII": "TECH", "MTDL": "TECH",
-    "ASSA": "TRANS", "BIRD": "TRANS", "SMDR": "TRANS", "TMAS": "TRANS",
-    "GIAA": "TRANS", "IATA": "TRANS",
-    "AALI": "PLANTATION", "LSIP": "PLANTATION", "SIMP": "PLANTATION", "SMAR": "PLANTATION",
-    "DSNG": "PLANTATION", "TAPG": "PLANTATION", "SGRO": "PLANTATION",
-    "UNTR": "HEAVY-EQP", "PTRO": "HEAVY-EQP",
-}
-
-FALLBACK_UNIVERSE = sorted(set(list(MASTER_AFILIASI) + list(SECTOR_MAP)))
+SEKTOR_FINANSIAL = {"Keuangan"}
+PAPAN_PENGEMBANGAN = {"NCKL", "DOID"}  # placeholder -- perlu update manual berkala
+ALL_TICKERS = sorted({t for lst in SECTOR_BASKETS.values() for t in lst})
 
 # =====================================================================
-# PENGAMBILAN DATA
+# PARAMETER (kalibrasi di sini)
 # =====================================================================
-@st.cache_data(ttl=86400, show_spinner=False)
-def ambil_universe():
-    """Daftar emiten IDX dari screener TradingView. Gagal -> daftar bawaan."""
-    if not ADA_REQ:
-        return FALLBACK_UNIVERSE, "bawaan", {}, {}, {}
-    try:
-        body = {"filter": [{"left": "type", "operation": "equal", "right": "stock"}],
-                "columns": ["name", "sector", "market_cap_basic",
-                            "float_shares_percent_current"], "range": [0, 1200],
-                "sort": {"sortBy": "name", "sortOrder": "asc"}}
-        r = requests.post("https://scanner.tradingview.com/indonesia/scan",
-                          json=body, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
-        rows = r.json().get("data", [])
-        tics, sect, mcap, ff = [], {}, {}, {}
-        for d in rows:
-            kode = d["d"][0]
-            if kode and kode.isalpha() and 3 <= len(kode) <= 5:
-                tics.append(kode)
-                if d["d"][1]:
-                    sect.setdefault(kode, d["d"][1])
-                if d["d"][2]:
-                    mcap[kode] = float(d["d"][2])
-                if len(d["d"]) > 3 and d["d"][3]:
-                    ff[kode] = float(d["d"][3])
-        if len(tics) > 200:
-            for k, v in sect.items():
-                SECTOR_MAP.setdefault(k, v)
-            return sorted(set(tics)), "TradingView", mcap, ff
-    except Exception:
-        pass
-    return FALLBACK_UNIVERSE, "bawaan", {}, {}
+BEAR_THRESHOLD = -0.20
+REBOUND_TRIGGER = 0.20
+NORMALIZING_TRIGGER = 0.20
+GAP_SIGNIFIKAN_THRESHOLD = -10.0
+BERAT_NAIK_DER_MULTIPLIER = 1.5
+BERAT_NAIK_BETA_THRESHOLD = 0.3
+BERAT_NAIK_TOP_N_MCAP = 2
+BERAT_NAIK_PENALTY = 0.5
+PARTICIPATION_VOL_RATIO = 4.0
+PARTICIPATION_VALUE_IDR = 100_000_000_000
+MODAL_EQUITAS = 20_000_000
+
+# --- Manajemen risiko posisi (30 Agu 2026, respons review Claude Project lain) ---
+LARI_HARI_INI_MAKS = 0.05      # skip kandidat kalau harga sudah lari >5% dari open hari itu
+                                 # (mirip konsep LARI SEJAK Turtle Board, versi data harian)
+SL_KERAS_PCT = -0.10           # SL keras dari harga entry, aktif SEJAK HARI PERTAMA -- ini
+                                 # yang menutup "zona tanpa perlindungan" sebelum trailing-lock
+                                 # aktif (trailing baru mulai di gain >=10%, jadi ada jendela
+                                 # rugi -0% s/d -SL_KERAS_PCT yang sebelumnya tidak terjaga sama sekali)
+TRAILING_AKTIF_GAIN = 0.10     # trailing-lock baru aktif setelah gain >= ini
+TRAILING_LOCK_PCT = 0.75       # trailing-lock mengunci 75% dari gain puncak
+
+# =====================================================================
+# REFERENSI SIKLUS 2026 -- DATA STATIS (puncak & bottom sudah jadi sejarah)
+# =====================================================================
+PUNCAK_2026 = 9134.70                         # 20 Jan 2026
+TROUGH_2026_HARGA = 5342.14                   # 8 Jun 2026
+TROUGH_2026_TANGGAL = pd.Timestamp("2026-06-08")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def ambil_harga(tickers, periode="1y", batch=80):
-    """Unduh bar harian secara batch, dengan retry individual untuk yang gagal di batch."""
+def ambil_harga_ihsg_now():
+    """Fungsi ini SALINAN PERSIS ambil_makro() Turtle Board (tickers, period, semua
+    parameter sama persis) -- terbukti jalan di server yang sama. Tidak dimodifikasi
+    lagi supaya tidak ada lagi tebakan soal parameter mana yang beda.
+    Mengembalikan (harga, tanggal, error_message)."""
+    peta = {"^JKSE": "IHSG", "IDR=X": "USDIDR", "CL=F": "MINYAK",
+            "GC=F": "EMAS", "HG=F": "TEMBAGA", "^IXIC": "NASDAQ"}
+    try:
+        df = yf.download(list(peta), period="1mo", interval="1d", progress=False,
+                         auto_adjust=False, group_by="ticker", threads=True)
+        if df is None or df.empty:
+            return None, None, f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
+        if isinstance(df.columns, pd.MultiIndex):
+            if "^JKSE" not in df.columns.get_level_values(0):
+                return None, None, f"Kolom tidak ada '^JKSE'. Kolom yang ada: {list(df.columns)[:10]}"
+            close = df["^JKSE"]["Close"].dropna()
+        else:
+            close = df["Close"].dropna()
+        if len(close) == 0:
+            return None, None, "Kolom Close ada tapi semua nilai NaN/kosong setelah dropna()."
+        return float(close.iloc[-1]), close.index[-1], None
+    except Exception as e:
+        import traceback
+        return None, None, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+
+
+# =====================================================================
+# BETA MANUAL VS IHSG (30 Agu 2026)
+# =====================================================================
+# yfinance .info['beta'] TERBUKTI TIDAK BISA DIPERCAYA untuk saham IDX --
+# cross-check manual (SMGR: yfinance 0.08 vs hitung manual 0.92, PGAS: yfinance
+# 0.09 vs manual 0.69) menunjukkan yfinance kemungkinan menghitung terhadap
+# index yang salah (bukan IHSG). Beta di sistem ini SEKARANG dihitung sendiri:
+# kovarian return harian saham vs return harian IHSG, dibagi varian IHSG,
+# pakai 1 tahun data -- bukan lagi ambil dari info dict yfinance.
+@st.cache_data(ttl=1800, show_spinner=False)
+def ambil_ihsg_untuk_beta():
+    """IHSG ~1 tahun terakhir, cuma untuk hitung beta -- request bareng ticker
+    lain (bukan sendirian), pola yang sama terbukti jalan di ambil_harga_ihsg_now."""
+    try:
+        df = yf.download(["^JKSE", "IDR=X", "^IXIC"], period="1y", interval="1d",
+                         progress=False, auto_adjust=False, group_by="ticker", threads=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            close = df["^JKSE"]["Close"].dropna()
+        else:
+            close = df["Close"].dropna()
+        return close
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def hitung_beta(close_saham, close_ihsg):
+    """Beta = kovarian(return saham, return IHSG) / varian(return IHSG)."""
+    try:
+        ret_saham = close_saham.pct_change().dropna()
+        ret_ihsg = close_ihsg.pct_change().dropna()
+        gabung = pd.concat([ret_saham, ret_ihsg], axis=1, join="inner").dropna()
+        if len(gabung) < 60:  # kurang dari ~3 bulan data overlap, jangan dipercaya
+            return None
+        gabung.columns = ["saham", "ihsg"]
+        var_ihsg = gabung["ihsg"].var()
+        if var_ihsg == 0:
+            return None
+        return float(gabung["saham"].cov(gabung["ihsg"]) / var_ihsg)
+    except Exception:
+        return None
+
+
+def status_ihsg_ringan(harga_now, tanggal):
+    drawdown_52w = (harga_now - PUNCAK_2026) / PUNCAK_2026 * 100
+    pct_dari_trough = (harga_now - TROUGH_2026_HARGA) / TROUGH_2026_HARGA * 100
+    if pct_dari_trough >= NORMALIZING_TRIGGER * 100:
+        fase = "NORMALIZING"
+    elif pct_dari_trough >= REBOUND_TRIGGER * 100:
+        fase = "BOTTOM-REBOUND"
+    else:
+        fase = "BEAR"
+    return {"harga": harga_now, "tanggal": tanggal, "drawdown_52w": drawdown_52w,
+           "fase": fase, "trough_date": TROUGH_2026_TANGGAL, "pct_dari_trough": pct_dari_trough}
+
+
+# =====================================================================
+# BACKTEST HISTORIS -- DATA STATIS, BUKAN LIVE
+# =====================================================================
+BACKTEST_HISTORIS = [
+    {"horizon": 20, "n": 7, "avg": -0.8, "pct_pos": 57.0, "worst": -9.6, "mae_avg": -5.0},
+    {"horizon": 40, "n": 7, "avg": 4.3, "pct_pos": 86.0, "worst": -1.0, "mae_avg": -5.0},
+    {"horizon": 60, "n": 7, "avg": 6.6, "pct_pos": 71.0, "worst": -2.8, "mae_avg": -5.4},
+    {"horizon": 120, "n": 7, "avg": 12.2, "pct_pos": 86.0, "worst": -8.8, "mae_avg": -7.1},
+]
+
+SEKTOR_HISTORIS_TERCEPAT = ["Barang Baku", "Energi", "Perindustrian"]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ambil_universe(tickers, periode="500d", batch=80):
     keluar = {}
     for i in range(0, len(tickers), batch):
         chunk = [f"{t}.JK" for t in tickers[i:i + batch]]
@@ -265,705 +311,672 @@ def ambil_harga(tickers, periode="1y", batch=80):
             kode = sym[:-3]
             try:
                 sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
-                if len(sub) >= 60:
-                    keluar[kode] = sub
-            except Exception:
-                continue
-
-    # retry batch kecil utk kode yg gagal/kurang di putaran pertama -- yf.download kadang
-    # drop sebagian kode dalam batch besar meski datanya sebenarnya tersedia. Batch kecil
-    # (15 kode) mengurangi kemungkinan drop dobel tanpa bikin scan jadi lambat banget.
-    gagal = [t for t in tickers if t not in keluar]
-    retry_batch = 15
-    for i in range(0, len(gagal), retry_batch):
-        chunk_kode = gagal[i:i + retry_batch]
-        chunk = [f"{t}.JK" for t in chunk_kode]
-        try:
-            df = yf.download(chunk, period=periode, interval="1d", progress=False,
-                             auto_adjust=False, group_by="ticker", threads=True)
-        except Exception:
-            continue
-        for sym in chunk:
-            kode = sym[:-3]
-            try:
-                sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
-                if len(sub) >= 60:
+                sub = sub[["Open", "Close", "Volume"]].dropna()
+                if len(sub) >= 25:
                     keluar[kode] = sub
             except Exception:
                 continue
     return keluar
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def ambil_makro():
-    out = {}
-    peta = {"^JKSE": "IHSG", "IDR=X": "USDIDR", "CL=F": "MINYAK",
-            "GC=F": "EMAS", "HG=F": "TEMBAGA", "^IXIC": "NASDAQ"}
+@st.cache_data(ttl=3600, show_spinner=False)
+def ambil_info(ticker):
     try:
-        df = yf.download(list(peta), period="1mo", interval="1d", progress=False,
-                         auto_adjust=False, group_by="ticker", threads=True)
-        for sym, nama in peta.items():
-            try:
-                s = (df[sym]["Close"] if isinstance(df.columns, pd.MultiIndex)
-                     else df["Close"]).dropna()
-                if len(s) >= 2:
-                    out[nama] = {"val": float(s.iloc[-1]),
-                                 "chg": float(s.iloc[-1] / s.iloc[-2] - 1) * 100}
-            except Exception:
-                continue
+        return yf.Ticker(f"{ticker}.JK").info
     except Exception:
-        pass
+        return {}
+
+
+# =====================================================================
+# RSS BERITA -- VERSI SEDERHANA (30 Agu 2026)
+# =====================================================================
+RSS_KEYWORD_NEGATIF = [
+    "gagal bayar", "pailit", "bangkrut", "delisting", "suspend", "korupsi",
+    "gugatan", "kasus dugaan", "penipuan", "skandal", "pkpu", "rugi besar",
+    "turun tajam", "anjlok", "diperiksa", "tersangka",
+]
+
+RSS_SITUS_KREDIBEL = ["kontan.co.id", "bisnis.com", "emitennews.com", "katadata.co.id"]
+
+RSS_KEYWORD_POSITIF = [
+    "laba naik", "laba melonjak", "untung besar", "ekspansi", "akuisisi",
+    "kinerja solid", "rekomendasi beli", "buyback", "dividen jumbo",
+    "kontrak baru", "penghargaan", "pulih", "prospek cerah", "genjot produksi",
+]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cek_rss_negatif(ticker):
+    """Mengembalikan dict berisi berita PALING BARU (apapun sentimennya) + status exclude."""
+    import email.utils
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+    situs_q = " OR ".join(f"site:{s}" for s in RSS_SITUS_KREDIBEL)
+    q = f"saham {ticker} ({situs_q})"
+    kosong = {"negatif": False, "judul": None, "tanggal": None, "sentimen": None,
+             "n_berita": 0, "gagal": False}
+    try:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=id&gl=ID&ceid=ID:id"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        root = ET.fromstring(r.content)
+        berita = []
+        for item in root.findall(".//item")[:5]:
+            title_el = item.find("title")
+            date_el = item.find("pubDate")
+            title = title_el.text if title_el is not None else ""
+            tgl_raw = date_el.text if date_el is not None else None
+            try:
+                tgl = email.utils.parsedate_to_datetime(tgl_raw) if tgl_raw else None
+            except Exception:
+                tgl = None
+            berita.append((title, tgl))
+        if not berita:
+            return kosong
+        berita.sort(key=lambda x: x[1] or pd.Timestamp.min.tz_localize("UTC"), reverse=True)
+        judul_terbaru, tgl_terbaru = berita[0]
+        judul_lower = judul_terbaru.lower()
+        tgl_str = tgl_terbaru.strftime("%d %b %Y") if tgl_terbaru else "tanggal tidak diketahui"
+
+        sentimen = "netral"
+        negatif = False
+        for kw in RSS_KEYWORD_NEGATIF:
+            if kw in judul_lower:
+                sentimen = "negatif"
+                negatif = True
+                break
+        if sentimen == "netral":
+            for kw in RSS_KEYWORD_POSITIF:
+                if kw in judul_lower:
+                    sentimen = "positif"
+                    break
+
+        return {"negatif": negatif, "judul": judul_terbaru, "tanggal": tgl_str,
+               "sentimen": sentimen, "n_berita": len(berita), "gagal": False}
+    except Exception:
+        return {**kosong, "gagal": True}
+
+
+# =====================================================================
+# TAHAP 1 -- FASE IHSG
+# =====================================================================
+def cari_episode_bear(close):
+    roll_max = close.rolling(252, min_periods=50).max()
+    drawdown = (close - roll_max) / roll_max
+    in_bear = drawdown <= BEAR_THRESHOLD
+    raw, start = [], None
+    for date, flag in in_bear.items():
+        if flag and start is None:
+            start = date
+        if not flag and start is not None:
+            raw.append((start, date)); start = None
+    if start is not None:
+        raw.append((start, in_bear.index[-1]))
+    merged = []
+    for s, e in raw:
+        if merged and (s - merged[-1][1]).days < 90:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return [(s, e) for s, e in merged if (e - s).days >= 20]
+
+
+def hitung_episode(close):
+    episodes = []
+    for peak_date, episode_end in cari_episode_bear(close):
+        seg = close[peak_date:episode_end]
+        trough_date = seg.idxmin()
+        trough_price = seg.min()
+        target = trough_price * (1 + REBOUND_TRIGGER)
+        after = close[trough_date:]
+        hit = after[after >= target]
+        if len(hit) == 0:
+            continue
+        signal_date, signal_price = hit.index[0], hit.iloc[0]
+        future = close[close.index > signal_date]
+        ep = {"trough_date": trough_date, "signal_date": signal_date,
+              "signal_price": signal_price, "ongoing": len(future) < 20}
+        if not ep["ongoing"]:
+            fwd = {}
+            mae = {}
+            for h in [20, 40, 60, 120]:
+                if len(future) >= h:
+                    fwd[h] = (future.iloc[h-1] - signal_price) / signal_price * 100
+                    window = future.iloc[:h]
+                    mae[h] = (window.min() - signal_price) / signal_price * 100
+                else:
+                    ep["ongoing"] = True
+            ep["forward"] = fwd
+            ep["mae"] = mae
+        episodes.append(ep)
+    return episodes
+
+
+def ringkas_backtest(episodes):
+    completed = [e for e in episodes if not e["ongoing"]]
+    rows = []
+    for h in [20, 40, 60, 120]:
+        rets = [e["forward"][h] for e in completed if h in e.get("forward", {})]
+        maes = [e["mae"][h] for e in completed if h in e.get("mae", {})]
+        if not rets:
+            continue
+        rows.append({"horizon": h, "n": len(rets), "avg": np.mean(rets),
+                    "pct_pos": sum(1 for r in rets if r > 0) / len(rets) * 100,
+                    "worst": min(rets), "mae_avg": np.mean(maes)})
+    return rows
+
+
+def status_ihsg(close, episodes):
+    if len(close) == 0:
+        return None
+    last_price, last_date = close.iloc[-1], close.index[-1]
+    roll_max = close.rolling(252, min_periods=50).max()
+    dd_now = (last_price - roll_max.iloc[-1]) / roll_max.iloc[-1] * 100
+    ongoing = [e for e in episodes if e["ongoing"]]
+    out = {"tanggal": last_date, "harga": last_price, "drawdown_52w": dd_now}
+    if ongoing:
+        ep = ongoing[-1]
+        pct_dari_trough = (last_price - close[ep["trough_date"]]) / close[ep["trough_date"]] * 100
+        if pct_dari_trough >= NORMALIZING_TRIGGER * 100:
+            fase = "NORMALIZING"
+        elif pct_dari_trough >= REBOUND_TRIGGER * 100:
+            fase = "BOTTOM-REBOUND"
+        else:
+            fase = "BEAR"
+        out.update({"fase": fase, "trough_date": ep["trough_date"], "pct_dari_trough": pct_dari_trough})
+    else:
+        out.update({"fase": "NORMAL", "trough_date": None, "pct_dari_trough": None})
     return out
 
 
+def traffic_light(fase, backtest):
+    if fase == "BOTTOM-REBOUND":
+        return "🟢", "Fase rebound awal — syarat sektor & saham aktif dicari"
+    if fase == "NORMALIZING":
+        b40 = next((b for b in backtest if b["horizon"] == 40), None)
+        if b40 and b40["pct_pos"] >= 70:
+            return "🟡", "Sudah lewat fase awal (>20% dari bottom) — masih ada peluang tapi tidak seoptimal fase rebound awal"
+        return "🟡", "Fase transisi — perlu lebih selektif"
+    if fase == "BEAR":
+        return "🔴", "Masih tren turun, belum ada konfirmasi rebound"
+    return "🔴", "Tidak ada bear market aktif — strategi ini dirancang khusus untuk fase bottom-rebound"
+
+
 # =====================================================================
-# MESIN TURTLE
+# TAHAP 2 -- SEKTOR
 # =====================================================================
-def hitung_N(df, periode=20):
-    """N = Wilder smoothing 20 hari dari True Range. Rumus asli Turtle."""
-    h, l, c = df["High"], df["Low"], df["Close"]
-    pc = c.shift(1)
-    tr = pd.concat([h - l, (h - pc).abs(), (pc - l).abs()], axis=1).max(axis=1)
-    seed = tr.rolling(periode).mean()
-    v = np.array(seed.values, dtype=float, copy=True)
-    t = np.array(tr.values, dtype=float, copy=True)
-    for i in range(periode + 1, len(v)):
-        if not np.isnan(v[i - 1]):
-            v[i] = (v[i - 1] * (periode - 1) + t[i]) / periode
-    return v[-1]
+def status_sektor(harga_map, trough_date):
+    hasil = []
+    for sektor, tickers in SECTOR_BASKETS.items():
+        rets = []
+        for t in tickers:
+            if t not in harga_map:
+                continue
+            s = harga_map[t]["Close"]
+            s_after = s[s.index >= trough_date]
+            if len(s_after) < 2:
+                continue
+            rets.append((s_after.iloc[-1] - s_after.iloc[0]) / s_after.iloc[0] * 100)
+        if rets:
+            hasil.append({"sektor": sektor, "return": float(np.mean(rets)), "n": len(rets)})
+    hasil.sort(key=lambda x: -x["return"])
+    for i, r in enumerate(hasil):
+        r["ranking"] = i + 1
+        r["bergerak"] = r["return"] > 0
+    return hasil
 
 
-def metrik(kode, df, p_masuk, p_keluar):
-    if len(df) < p_masuk + 25:
+# =====================================================================
+# TAHAP 3 -- KANDIDAT EMITEN
+# =====================================================================
+def metrik_saham(harga_map, ticker, sector_avg, trough_date):
+    if ticker not in harga_map:
         return None
-    C = df["Close"].values.astype(float)
-    V = df["Volume"].values.astype(float)
-    n = hitung_N(df, 20)
-    if not np.isfinite(n) or n <= 0:
+    df = harga_map[ticker]
+    close, volume = df["Close"], df["Volume"]
+    open_ = df["Open"] if "Open" in df.columns else None
+    if len(close) < 25:
         return None
-    seri_tinggi = df["High"].shift(1).rolling(p_masuk).max()
-    tinggi = float(seri_tinggi.iloc[-1])
-    rendah = float(df["Low"].shift(1).rolling(p_keluar).min().iloc[-1])
+    close_after = close[close.index >= trough_date]
+    if len(close_after) < 2:
+        return None
+    stock_return = (close_after.iloc[-1] - close_after.iloc[0]) / close_after.iloc[0] * 100
+    gap = stock_return - sector_avg
+    vol_5h, vol_20h = volume.tail(5).mean(), volume.tail(20).mean()
+    vol_ratio_5h = vol_5h / vol_20h if vol_20h > 0 else 0
+    vol_ratio_today = volume.iloc[-1] / vol_20h if vol_20h > 0 else 0
+    low_recent = close.tail(5).min()
+    low_prior = close.tail(40).head(20).min() if len(close) >= 40 else close.min()
+    higher_low = low_recent > low_prior
+    value_sesi_ini = float(close.iloc[-1] * volume.iloc[-1])
+    roll_max = close.rolling(min(len(close), 750), min_periods=50).max()
+    dd = (close - roll_max) / roll_max * 100
+    max_dd = float(dd.min()) if not dd.isna().all() else 0.0
+    candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
+    lari_hari_ini = float((close.iloc[-1] - open_.iloc[-1]) / open_.iloc[-1]) if open_ is not None and open_.iloc[-1] > 0 else None
+    return {
+        "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
+        "higher_low": higher_low, "value_sesi_ini": value_sesi_ini, "max_dd": max_dd,
+        "candle_hijau": candle_hijau, "lari_hari_ini": lari_hari_ini,
+        "harga_20h": close.tail(20).tolist(), "volume_20h": volume.tail(20).tolist(),
+    }
 
-    # berapa hari sejak tembus PERTAMA dalam rentetan yang sedang berjalan,
-    # dan berapa jauh harga sudah lari sejak hari itu
-    tembus_seri = (df["Close"] > seri_tinggi).values
-    hari_sejak, lari = np.nan, np.nan
-    if len(tembus_seri) and bool(tembus_seri[-1]):
-        i = len(tembus_seri) - 1
-        while i > 0 and tembus_seri[i]:
-            i -= 1
-        awal = i + 1
-        hari_sejak = float(len(tembus_seri) - 1 - awal)
-        if C[awal] > 0:
-            lari = float(C[-1] / C[awal] - 1)
-    volrata = float(np.mean(V[-21:-1])) or 1.0
-    tv = (C * V)[-20:]
-    return dict(
-        kode=kode, harga=float(C[-1]), N=float(n),
-        tinggi20=tinggi, rendah10=rendah,
-        vol_rasio=float(V[-1] / volrata),
-        rp1pct=rupiah_per_1persen(df),
-        turn_min20=float(np.min(tv)), turn_med=float(np.median(tv)),
-        turn_med_m=float(np.median(tv)) / 1e9,
-        tembus=bool(C[-1] > tinggi),
-        hari_sejak=hari_sejak, lari=lari,
-        jarak=float(C[-1] / tinggi - 1) if tinggi else np.nan,
-        grup=MASTER_AFILIASI.get(kode, "-"),
-        sektor=SECTOR_MAP.get(kode, "-"),
-        tanggal=df.index[-1].strftime("%d %b %Y"),
+
+def gerbang_keras(ticker, m, sector_median_dd):
+    alasan = []
+    if ticker in PAPAN_PENGEMBANGAN:
+        alasan.append("Papan Pengembangan")
+    if sector_median_dd != 0 and m["max_dd"] < sector_median_dd * 2.0:
+        alasan.append("drawdown historis ekstrem vs median sektor")
+    return alasan
+
+
+def penalti_berat_naik(ticker, info, sector_der_median, market_caps, beta_manual):
+    alasan = []
+    der, mcap = info.get("debtToEquity"), info.get("marketCap")
+    if der is not None and sector_der_median:
+        if der > sector_der_median * BERAT_NAIK_DER_MULTIPLIER:
+            alasan.append(f"DER {der:.0f} tinggi (dari yfinance, akurasi belum terverifikasi -- ada gap dengan sumber lain saat dicek manual)")
+    if beta_manual is not None and abs(beta_manual) < BERAT_NAIK_BETA_THRESHOLD:
+        alasan.append(f"beta {beta_manual:.2f} mendekati nol (dihitung manual vs IHSG)")
+    if mcap is not None and market_caps:
+        top_n = {t for t, _ in sorted(market_caps.items(), key=lambda x: -x[1])[:BERAT_NAIK_TOP_N_MCAP]}
+        if ticker in top_n:
+            alasan.append("saham terbesar sektor")
+    return alasan
+
+
+def skor_dan_tier(m, gate, penalty):
+    if gate:
+        return 0.0, "tidak_lolos"
+    gap_score = max(0, min(100, -m["gap"] * 2)) if m["gap"] < 0 else 0
+    part_score = (50 if m["vol_ratio_5h"] > 1.0 else 0) + (50 if m["higher_low"] else 0)
+    skor = gap_score * 0.60 + part_score * 0.40
+    if penalty:
+        skor *= BERAT_NAIK_PENALTY
+    gap_signifikan = m["gap"] <= GAP_SIGNIFIKAN_THRESHOLD
+    partisipasi_ok = m["vol_ratio_5h"] > 1.0 and m["higher_low"]
+    if gap_signifikan and partisipasi_ok:
+        tier = "kuat"
+    elif gap_signifikan:
+        tier = "menunggu"
+    else:
+        tier = "gap_kecil"
+    return round(skor, 1), tier
+
+
+# =====================================================================
+# RADAR 5 DIMENSI (langkah awal, terinspirasi Snowflake Analysis)
+# =====================================================================
+RADAR_LABEL = ["Gap", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
+
+
+def hitung_dimensi_radar(c):
+    m = c["m"]
+
+    gap_dim = max(0, min(100, -m["gap"] * 3))  # -33% gap = 100
+
+    part_dim = (50 if m["vol_ratio_5h"] > 1.0 else 0) + (50 if m["higher_low"] else 0)
+
+    kualitas_dim = 100 - len(c.get("penalty", [])) * 33
+    kualitas_dim = max(0, kualitas_dim)
+
+    rss = c.get("rss")
+    if rss and rss.get("sentimen") == "positif":
+        sentimen_dim = 100
+    elif rss and rss.get("sentimen") == "negatif":
+        sentimen_dim = 0
+    elif rss and rss.get("sentimen") == "netral":
+        sentimen_dim = 50
+    else:
+        sentimen_dim = 50  # belum dicek / tidak ada data -- netral, bukan 0
+
+    eksekusi_dim = min(60, m["vol_ratio_today"] / PARTICIPATION_VOL_RATIO * 60)
+    if m.get("candle_hijau") is True:
+        eksekusi_dim += 20
+    if m.get("lari_hari_ini") is not None and m["lari_hari_ini"] <= LARI_HARI_INI_MAKS:
+        eksekusi_dim += 20
+    eksekusi_dim = max(0, min(100, eksekusi_dim))
+
+    return {"Gap": round(gap_dim), "Partisipasi": round(part_dim),
+           "Kualitas": round(kualitas_dim), "Sentimen": round(sentimen_dim),
+           "Eksekusi": round(eksekusi_dim)}
+
+
+def render_radar(dimensi, judul):
+    """Warna amber redup (Opsi B) -- ganti dari kuning-emas default sebelumnya,
+    supaya konsisten dengan token warna baru dan beda karakter dari Turtle Board."""
+    nilai = [dimensi[l] for l in RADAR_LABEL] + [dimensi[RADAR_LABEL[0]]]
+    label = RADAR_LABEL + [RADAR_LABEL[0]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=nilai, theta=label, fill="toself", name=judul,
+        fillcolor="rgba(184,130,61,0.35)",
+        line=dict(color="rgba(184,130,61,0.9)", width=2),
+    ))
+    fig.update_layout(
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
+                           gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
+            angularaxis=dict(tickfont=dict(size=11, color="#9C8F7A", family="IBM Plex Mono"),
+                            gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
+        ),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False, height=240, margin=dict(l=40, r=40, t=20, b=20),
+        font=dict(color="#9C8F7A"),
     )
-
-
-def metrik_wyckoff(df, jendela=150, jendela_range=15):
-    """Prefilter re-akumulasi ala Wyckoff. Bukan sinyal masuk — cuma penyaring kandidat.
-
-    Jendela 150 hari (~7 bulan) — bukan 50 hari — supaya rally besar sebelum topping yang
-    genuinely butuh berbulan-bulan ikut tertangkap. Rally & turun dicari di window yang sama.
-
-    Lima syarat (dicek di luar fungsi ini, di baris DataFrame):
-        rally     : tertinggi jendela >= harga awal jendela x (1 + rally_min)
-        turun     : harga sekarang <= tertinggi jendela x (1 - turun_min)
-        sideways  : puncak terjadi >= sideways_min_hari yang lalu (bukan baru topping)
-        range     : lebar high-low 15 hari terakhir <= range_maks
-        volume    : rata-rata volume 20 hari >= rata-rata 50 hari x volume_mult
-    """
-    if len(df) < jendela + 5:
-        return None
-    sub = df.tail(jendela)
-    H = sub["High"].values.astype(float)
-    C = sub["Close"].values.astype(float)
-
-    tertinggi_puncak = float(H.max())
-    idx_puncak = int(np.argmax(H))
-    harga_awal = float(C[0])
-    harga_now = float(C[-1])
-    hari_sejak_puncak = (jendela - 1) - idx_puncak
-
-    rally_pct = (tertinggi_puncak / harga_awal - 1) if harga_awal > 0 else np.nan
-    turun_pct = (harga_now / tertinggi_puncak - 1) if tertinggi_puncak > 0 else np.nan
-
-    sub15 = df.tail(jendela_range)
-    low15min = float(sub15["Low"].min())
-    range15_pct = ((float(sub15["High"].max()) - low15min) / low15min) if low15min > 0 else np.nan
-
-    vol = df["Volume"]
-    volma20 = float(vol.tail(20).mean())
-    volma50 = float(vol.tail(50).mean())
-    vol_rasio_ma = (volma20 / volma50) if volma50 > 0 else np.nan
-
-    return dict(
-        tertinggi_puncak=tertinggi_puncak, rally_pct=rally_pct, turun_pct=turun_pct,
-        hari_sejak_puncak=float(hari_sejak_puncak), range15_pct=range15_pct,
-        vol_rasio_ma=vol_rasio_ma,
-    )
-
-
-BOBOT_BATAS = [(200e9, "SANGAT TEBAL"), (50e9, "TEBAL"), (10e9, "SEDANG"), (0, "TIPIS")]
-BOBOT_PILIHAN = ["TIPIS", "SEDANG", "TEBAL", "SANGAT TEBAL", "?"]
-
-
-def rupiah_per_1persen(df, jendela=60, min_nilai=1e6):
-    """Amihud: berapa rupiah transaksi dibutuhkan untuk menggerakkan harga 1%.
-
-    Median dipakai, bukan rata-rata — rata-rata terseret hari-hari sepi.
-    Jendela 60 hari supaya mencerminkan keadaan sekarang, bukan setahun lalu.
-    """
-    sub = df.tail(jendela)
-    C = sub["Close"]
-    nilai = C * sub["Volume"]
-    ret = C.pct_change().abs()
-    m = (nilai > min_nilai) & ret.notna() & (ret > 0)
-    if int(m.sum()) < 25:
-        return np.nan
-    rasio = float((ret[m] / nilai[m]).median())
-    return 0.01 / rasio if rasio > 0 else np.nan
-
-
-def label_bobot(v):
-    """Ukuran Amihud — perbandingan ketebalan antar saham.
-
-    PENTING: ini BUKAN biaya untuk menggerakkan harga. Angkanya median dari
-    hubungan gerak-harga dengan nilai transaksi, dan sebarannya lebar (AADI
-    berkisar 30-200 M dalam 60 hari yang sama). Lompatan pembukaan tidak
-    terukur sama sekali. Pakai untuk membandingkan saham, bukan sebagai
-    angka mutlak.
-    """
-    if v is None or not np.isfinite(v) or v <= 0:
-        return "?"
-    for batas, nama in BOBOT_BATAS:
-        if v >= batas:
-            return nama
-    return "TIPIS"
-
-
-def ukuran_unit(ekuitas, N, risiko):
-    """1 Unit = (risiko% x ekuitas) / N, dibulatkan ke bawah per lot."""
-    if N <= 0 or ekuitas <= 0:
-        return 0
-    return int(((ekuitas * risiko) / N) // 100)
+    st.plotly_chart(fig, use_container_width=True, key=f"radar_{judul}")
 
 
 # =====================================================================
-# SIDEBAR
+# TAHAP 4 -- BOBOT EKUITAS
 # =====================================================================
-st.sidebar.markdown("### EKUITAS")
-mode_rekam = st.sidebar.toggle(
-    "Mode rekam", value=False,
-    help="Untuk perekaman layar: ekuitas dan kas diganti angka contoh yang bulat. "
-         "Seluruh hitungan tetap benar, cuma modalnya bukan modalmu.")
+def bobot_ekuitas(kandidat):
+    hijau = [c for c in kandidat if c["tier"] == "kuat"]
+    if not hijau:
+        return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
+    lolos = [c for c in hijau
+             if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+             and c["m"]["candle_hijau"] is True
+             and (c["m"]["lari_hari_ini"] is None or c["m"]["lari_hari_ini"] <= LARI_HARI_INI_MAKS)]
+    if not lolos:
+        vol_saja = [c["ticker"] for c in hijau
+                   if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+                   and c["m"]["candle_hijau"] is False]
+        sudah_lari = [c["ticker"] for c in hijau
+                     if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
+                     and c["m"]["candle_hijau"] is True
+                     and c["m"]["lari_hari_ini"] is not None
+                     and c["m"]["lari_hari_ini"] > LARI_HARI_INI_MAKS]
+        detail = (f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos "
+                 f"(volume>={PARTICIPATION_VOL_RATIO:.0f}x DAN candle hijau DAN lari hari ini <={LARI_HARI_INI_MAKS*100:.0f}%).")
+        if vol_saja:
+            detail += f" {len(vol_saja)} sempat volume tinggi tapi candle merah ({', '.join(vol_saja)}) -- indikasi distribusi bukan akumulasi."
+        if sudah_lari:
+            detail += f" {len(sudah_lari)} sudah lari >{LARI_HARI_INI_MAKS*100:.0f}% hari ini ({', '.join(sudah_lari)}) -- risiko beli di puncak harian."
+        return {"status": "cash_ditahan", "detail": detail,
+               "pilihan": None, "menunggu": [c["ticker"] for c in hijau]}
+    if len(lolos) == 1:
+        pilihan, alasan = lolos[0], "satu-satunya kandidat lolos eksekusi"
+    else:
+        tanpa_penalti = [c for c in lolos if not c["penalty"]]
+        pool = tanpa_penalti if tanpa_penalti else lolos
+        pilihan = max(pool, key=lambda c: c["m"]["vol_ratio_today"])
+        kalah = [c["ticker"] for c in lolos if c["ticker"] != pilihan["ticker"]]
+        alasan = f"menang tie-breaker (vol {pilihan['m']['vol_ratio_today']:.1f}x) vs {', '.join(kalah)}"
+    return {"status": "all_in", "detail": alasan, "pilihan": pilihan["ticker"],
+            "kalah": [c["ticker"] for c in lolos if c["ticker"] != pilihan["ticker"]]}
 
-if mode_rekam:
-    ekuitas = st.sidebar.number_input("Ekuitas contoh (Rp)", 0, 10_000_000_000,
-                                      100_000_000, 10_000_000)
-    kas = st.sidebar.number_input("Kas contoh (Rp)", 0, 10_000_000_000,
-                                  50_000_000, 10_000_000)
-    st.sidebar.caption("Mode rekam menyala — angka di layar bukan modal sebenarnya.")
-else:
-    ekuitas = st.sidebar.number_input(
-        "Ekuitas (Rp)", min_value=0, max_value=10_000_000_000,
-        value=58_233_835, step=100_000,
-        help="Dipakai untuk menghitung ukuran Unit. Perbarui setiap ada transaksi match.")
-    kas = st.sidebar.number_input(
-        "Kas bebas (Rp)", min_value=0, max_value=10_000_000_000,
-        value=28_773_603, step=100_000,
-        help="Batas keras: nilai 1 unit tidak boleh melebihi kas.")
-
-st.sidebar.markdown("### ATURAN TURTLE")
-risiko = st.sidebar.select_slider("Risiko per Unit (% ekuitas)",
-                                  options=[0.5, 0.75, 1.0, 1.25, 1.5], value=1.0) / 100
-p_masuk = st.sidebar.number_input("Periode tembus (masuk)", 5, 60, 20)
-p_keluar = st.sidebar.number_input("Periode keluar", 3, 30, 10)
-maks_unit = st.sidebar.number_input("Maks unit per saham", 1, 12, 4)
-
-st.sidebar.markdown("### EKUITAS SPRING (akun FUNDAMENTAL)")
-st.sidebar.caption("Terpisah dari ekuitas OBERLIN di atas. Dipakai khusus tab WYCKOFF SPRING.")
-if mode_rekam:
-    ekuitas_spring = st.sidebar.number_input("Ekuitas SPRING contoh (Rp)", 0, 10_000_000_000,
-                                             9_500_000, 500_000)
-    kas_spring = st.sidebar.number_input("Kas SPRING contoh (Rp)", 0, 10_000_000_000,
-                                         9_500_000, 500_000)
-else:
-    ekuitas_spring = st.sidebar.number_input(
-        "Ekuitas SPRING (Rp)", min_value=0, max_value=10_000_000_000,
-        value=9_518_963, step=100_000,
-        help="Modal gabungan sisa kas OBERLIN + FUNDAMENTAL + TEKNIKAL yang dialokasikan ke SPRING.")
-    kas_spring = st.sidebar.number_input(
-        "Kas bebas SPRING (Rp)", min_value=0, max_value=10_000_000_000,
-        value=9_518_963, step=100_000,
-        help="Batas keras: nilai 1 unit SPRING tidak boleh melebihi ini.")
-
-st.sidebar.markdown("### ATURAN WYCKOFF SPRING")
-st.sidebar.caption("Prefilter re-akumulasi, dipakai bareng semesta yang sama dengan Turtle Board. "
-                   "Bukan sinyal masuk — cuma penyaring kandidat sebelum dicek Turtle.")
-rally_min = st.sidebar.slider("Rally minimal sebelum puncak (%)", 20, 150, 50, 5) / 100
-turun_min = st.sidebar.slider("Turun minimal dari puncak (%)", 5, 50, 20, 5) / 100
-sideways_min_hari = st.sidebar.number_input("Sideways minimal (hari)", 5, 60, 15, 1)
-range_maks = st.sidebar.slider("Lebar range 15 hari maksimal (%)", 5, 50, 20, 5) / 100
-volume_mult = st.sidebar.slider("Volume MA20 vs MA50 (kelipatan)", 1.0, 3.0, 1.2, 0.1)
-
-st.sidebar.markdown("### SARINGAN IDX")
-st.sidebar.caption("Dua saringan di bawah TIDAK ada di aturan Turtle. Wajib untuk IDX tanpa margin.")
-amb_likuid = st.sidebar.selectbox(
-    "Transaksi harian minimal", [0, 1e9, 2e9, 5e9, 1e10],
-    index=3, format_func=lambda v: "Tanpa batas" if v == 0 else f"Rp {v/1e9:.0f} miliar")
-harga_min = st.sidebar.number_input("Harga minimal", 0, 100000, 50, 50)
-bobot_dipakai = st.sidebar.multiselect(
-    "Ketebalan pasar", BOBOT_PILIHAN, default=BOBOT_PILIHAN,
-    help="Perbandingan antar saham, bukan angka mutlak. TIPIS = harga bergerak jauh dengan "
-         "transaksi sedikit, dua arah. Uji 2 tahun tidak menemukan pola yang bisa diandalkan "
-         "antara ketebalan dan hasil, jadi pakai sebagai konteks saja.")
-
-st.sidebar.markdown("### DAFTAR MENDEKATI TEMBUS")
-ambang_dekat = st.sidebar.slider("Jarak maksimal dari level tembus (%)", 1.0, 15.0, 5.0, 0.5,
-                                 help="Peluang tembus besok: jarak 1% = 25%, 2% = 16%, "
-                                      "3% = 11%, 5% = 7%, 8% = 4%.")
-maks_kartu = st.sidebar.number_input("Maksimal kartu ditampilkan (0 = semua)", 0, 200, 0, 5)
-
-st.sidebar.markdown("### TAMPILAN")
-mode_tampil = st.sidebar.radio("Bentuk hasil", ["Tabel (layar lebar)", "Kartu (HP)"], index=0,
-                               help="Kartu: semua angka muat dalam satu tangkapan layar tegak.")
-
-st.sidebar.markdown("### SEMESTA")
-mode_universe = st.sidebar.radio("Cakupan", ["Semua IDX", "Grup terpantau saja"], index=0,
-                                 help="Semua IDX: putaran pertama 2-4 menit, lalu di-cache 15 menit.")
 
 # =====================================================================
 # HALAMAN
 # =====================================================================
-st.markdown('<div class="header-container"><div class="header-title">TURTLE BOARD</div>'
-            '<div class="header-sub">DONCHIAN 20 HARI &nbsp;·&nbsp; UKURAN UNIT BERBASIS N '
-            '&nbsp;·&nbsp; STOP 2N &nbsp;·&nbsp; KELUAR 10 HARI</div></div>',
-            unsafe_allow_html=True)
+st.title("Regime Screener")
 
-makro = ambil_makro()
-if makro:
-    urut = ["IHSG"] + [k for k in makro if k != "IHSG"]
-    html = "<div class='macro-strip'>"
-    for k in urut:
-        v = makro.get(k)
-        if not v:
-            continue
-        naik = v["chg"] >= 0
-        cls_teks = "macro-val-up" if naik else "macro-val-down"
-        cls_kotak = "macro-up" if naik else "macro-down"
-        utama = " macro-utama" if k == "IHSG" else ""
-        panah = "&#9650;" if naik else "&#9660;"
-        html += (f"<div class='macro-item {cls_kotak}{utama}'>"
-                 f"<span class='macro-label'>{k}</span>"
-                 f"<span class='{cls_teks}'>{v['val']:,.2f} {panah} {abs(v['chg']):.2f}%</span></div>")
-    st.markdown(html + "</div>", unsafe_allow_html=True)
+st.sidebar.markdown("### Posisi aktif (opsional)")
+st.sidebar.caption("Isi setelah eksekusi beli, supaya sistem bisa hitung SL/trailing-lock/override regime tiap dibuka.")
+posisi_aktif = st.sidebar.checkbox("Ada posisi aktif")
+posisi = None
+if posisi_aktif:
+    p_ticker = st.sidebar.text_input("Ticker (tanpa .JK)", value="").strip().upper()
+    p_harga_beli = st.sidebar.number_input("Harga beli", min_value=0.0, value=0.0, step=1.0)
+    p_tanggal_beli = st.sidebar.date_input("Tanggal beli")
+    if p_ticker and p_harga_beli > 0:
+        posisi = {"ticker": p_ticker, "harga_beli": p_harga_beli,
+                 "tanggal_beli": pd.Timestamp(p_tanggal_beli)}
+    st.sidebar.caption("Catatan: input ini TIDAK tersimpan permanen -- hilang kalau app di-reboot atau tab ditutup. Isi ulang tiap sesi.")
 
-st.markdown(f"""<div class="aturan">
-{'<b>MODE REKAM</b> &nbsp;·&nbsp; angka di bawah adalah contoh, bukan modal sebenarnya<br>' if mode_rekam else ''}
-<b>Risiko 1 unit:</b> Rp {ekuitas*risiko*2:,.0f} &nbsp;(= 2N x {risiko*100:.2f}% ekuitas)
-&nbsp;·&nbsp; <b>Kas bebas:</b> Rp {kas:,.0f}
-&nbsp;·&nbsp; <b>Batas:</b> {maks_unit} unit/saham · 6 unit/grup · 10 unit/sektor · 12 unit total<br>
-Tidak ada take profit. Tidak ada target. Tidak ada skor. Keluar hanya lewat terendah
-{p_keluar} hari atau stop 2N.
-</div>""".replace(",", "."), unsafe_allow_html=True)
+if st.button("🔄 Refresh data"):
+    st.cache_data.clear()
 
-if "hasil" not in st.session_state:
-    st.session_state.hasil = None
-    st.session_state.info = None
+@st.fragment(run_every="15m")
+def tampilkan_screener():
+    with st.spinner("Menarik harga IHSG hari ini..."):
+        harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
 
-if st.button("PINDAI SEMESTA IDX", type="primary", use_container_width=True):
-    with st.spinner("Menarik daftar emiten..."):
-        universe, sumber, mcap, ff = ambil_universe()
-    if mode_universe == "Grup terpantau saja":
-        universe = sorted(set(FALLBACK_UNIVERSE) & set(universe)) or FALLBACK_UNIVERSE
-    with st.spinner(f"Menarik bar harian {len(universe)} emiten (putaran pertama 2-4 menit)..."):
-        harga = ambil_harga(tuple(universe))
+    if harga_now is None:
+        st.warning("Gagal menarik harga IHSG otomatis dari Yahoo Finance. Masukkan manual dulu supaya tetap bisa dipakai:")
+        with st.expander("Detail error (opsional, buat didiagnosis nanti)"):
+            st.code(ihsg_error or "Tidak ada pesan error tercatat.")
+        harga_now = st.number_input("Harga IHSG hari ini", min_value=0.0, value=6500.0, step=0.01)
+        tanggal_now = pd.Timestamp.now().normalize()
+        if harga_now <= 0:
+            st.stop()
 
-    baris = []
-    for kode, df in harga.items():
-        try:
-            m = metrik(kode, df, int(p_masuk), int(p_keluar))
-            if m:
-                w = metrik_wyckoff(df)
-                m.update(w if w else dict(
-                    tertinggi_puncak=np.nan, rally_pct=np.nan, turun_pct=np.nan,
-                    hari_sejak_puncak=np.nan, range15_pct=np.nan, vol_rasio_ma=np.nan))
-                baris.append(m)
-        except Exception:
-            continue
+    ihsg = status_ihsg_ringan(harga_now, tanggal_now)
+    backtest = BACKTEST_HISTORIS
 
-    d = pd.DataFrame(baris)
-    if not d.empty:
-        d["mcap"] = d["kode"].map(mcap).fillna(0)
-        d["ff"] = d["kode"].map(ff)
-        d["bobot"] = d["rp1pct"].apply(label_bobot)
-        d["rp1pct_m"] = d["rp1pct"] / 1e9
-        d = d[(d["turn_min20"] >= amb_likuid) & (d["harga"] >= harga_min)]
-        d["unit_lot"] = d["N"].apply(lambda n: ukuran_unit(ekuitas, n, risiko))
-        d["nilai_unit"] = d["unit_lot"] * 100 * d["harga"]
-        d["sl_2n"] = d["harga"] - 2 * d["N"]
-        d["rugi_unit"] = d["unit_lot"] * 100 * 2 * d["N"]
-        d["pct_kas"] = d["nilai_unit"] / kas * 100 if kas else np.nan
-        d["muat"] = np.where(d["nilai_unit"] <= kas, "YA", "TIDAK")
-        d["kesegaran"] = np.where(
-            ~d["tembus"], "-",
-            np.where(d["hari_sejak"].fillna(99) == 0, "SEGAR",
-            np.where((d["hari_sejak"].fillna(99) <= 2) & (d["lari"].fillna(9) < 0.05),
-                     "MASIH OK", "TERTINGGAL")))
+    # --- Tahap 1: panel berjenjang (angka besar + label kecil) menggantikan
+    # baris "IHSG NORMALIZING · 6600 · +23.5%" yang disambung titik tengah.
+    light, note = traffic_light(ihsg["fase"], backtest)
+    fase_class = "karat" if ihsg["fase"] == "BEAR" else ""
+    st.markdown(f"""
+    <div class="rs-panel {fase_class}">
+      <div class="rs-label">{light} IHSG · {ihsg['fase']}</div>
+      <div class="rs-angka">{ihsg['harga']:,.0f}</div>
+      <div class="rs-sub">{ihsg['pct_dari_trough']:+.1f}% dari titik terendah</div>
+    </div>
+    """.replace(",", "."), unsafe_allow_html=True)
+    st.caption(note)
+    with st.expander("Detail backtest historis (7 episode sejak 2000)"):
+        st.dataframe(
+            [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
+              "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
+              "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
+            hide_index=True, width="stretch",
+        )
+        st.caption("Data statis, dihitung dari histori Yahoo Finance per 30 Agustus 2026 -- "
+                  "bukan ditarik ulang tiap app dibuka, karena episode-episode ini sudah selesai.")
 
-        # --- Wyckoff SPRING: flag kelolosan per syarat (NaN dianggap gagal) ---
-        d["rally_ok"] = d["rally_pct"].fillna(-999) >= rally_min
-        d["turun_ok"] = d["turun_pct"].fillna(999) <= -turun_min
-        d["sideways_ok"] = d["hari_sejak_puncak"].fillna(-999) >= sideways_min_hari
-        d["range_ok"] = d["range15_pct"].fillna(999) <= range_maks
-        d["volume_ok"] = d["vol_rasio_ma"].fillna(-999) >= volume_mult
-
-        # empat syarat dasar (struktur harga) wajib semua; volume MENENTUKAN TIER, bukan gerbang tunggal
-        dasar_ok = d["rally_ok"] & d["turun_ok"] & d["sideways_ok"] & d["range_ok"]
-        d["tier_siap"] = dasar_ok & d["volume_ok"]          # absorption klasik: volume ramai
-        d["tier_cek_broker"] = dasar_ok & (~d["volume_ok"])  # quiet accumulation: volume sepi, cek broker flow manual
-        d["lolos_wyckoff"] = dasar_ok  # dipakai kalau perlu gabungan kedua tier
-
-        # --- Wyckoff SPRING: ukuran unit pakai ekuitas/kas SPRING, terpisah dari OBERLIN ---
-        d["unit_lot_spring"] = d["N"].apply(lambda n: ukuran_unit(ekuitas_spring, n, risiko))
-        d["nilai_unit_spring"] = d["unit_lot_spring"] * 100 * d["harga"]
-        d["rugi_unit_spring"] = d["unit_lot_spring"] * 100 * 2 * d["N"]
-        d["pct_kas_spring"] = d["nilai_unit_spring"] / kas_spring * 100 if kas_spring else np.nan
-        d["muat_spring"] = np.where(d["nilai_unit_spring"] <= kas_spring, "YA", "TIDAK")
-    st.session_state.hasil = d
-    st.session_state.info = (sumber, len(harga), len(d) if not d.empty else 0)
-
-d = st.session_state.hasil
-
-if d is None:
-    st.markdown('<div class="kosong"><div class="kosong-judul">BELUM DIPINDAI</div>'
-                '<div class="kosong-sub">Tekan tombol di atas untuk memindai bursa.</div></div>',
-                unsafe_allow_html=True)
-    st.stop()
-
-if d.empty:
-    st.markdown('<div class="kosong"><div class="kosong-judul">TIDAK ADA DATA</div>'
-                '<div class="kosong-sub">Saringan likuiditas mungkin terlalu ketat.</div></div>',
-                unsafe_allow_html=True)
-    st.stop()
-
-sumber, n_hitung, n_lolos = st.session_state.info
-st.markdown(f"<div style='text-align:center;color:#5a666e;font-family:JetBrains Mono;"
-            f"font-size:10px;letter-spacing:2px;margin-bottom:12px'>"
-            f"{n_hitung} EMITEN DIHITUNG ({sumber}) &nbsp;·&nbsp; {n_lolos} LOLOS SARINGAN "
-            f"&nbsp;·&nbsp; DATA {d['tanggal'].iloc[0]} &nbsp;·&nbsp; "
-            f"{datetime.now(WIB).strftime('%d %b %Y %H:%M WIB')}</div>",
-            unsafe_allow_html=True)
-
-KOLOM = {"kode": "KODE", "kesegaran": "KESEGARAN", "hari_sejak": "TEMBUS",
-         "lari": "LARI SEJAK", "harga": "HARGA", "N": "N",
-         "tinggi20": f"TERTINGGI {p_masuk}H", "jarak": "JARAK", "vol_rasio": "VOL",
-         "unit_lot": "1 UNIT", "nilai_unit": "NILAI UNIT", "sl_2n": "SL 2N",
-         "rugi_unit": "RUGI 1 UNIT", "pct_kas": "% KAS",
-         "rendah10": f"KELUAR {p_keluar}H", "muat": "MUAT KAS",
-         "turn_med_m": "TRANSAKSI/HARI", "ff": "FF%", "bobot": "TEBAL",
-         "grup": "GRUP", "sektor": "SEKTOR"}
-URUT = list(KOLOM)
-
-KONF = {
-    "KESEGARAN": st.column_config.TextColumn(
-        help="SEGAR = tembus hari ini. TERTINGGAL = sudah lari jauh sejak tembus."),
-    "TEMBUS": st.column_config.TextColumn(help="Berapa hari lalu menembus tertinggi 20 hari"),
-    "LARI SEJAK": st.column_config.NumberColumn(
-        format="%.1f%%", help="Kenaikan harga sejak hari tembus. Makin besar, makin buruk entry-mu."),
-    "TRANSAKSI/HARI": st.column_config.NumberColumn(
-        format="%.2f M", help="Nilai transaksi harian, median 20 hari, dalam miliar rupiah."),
-    "FF%": st.column_config.NumberColumn(
-        format="%.0f%%", help="Persentase saham beredar bebas. Makin kecil, makin sedikit "
-                              "barang yang benar-benar bisa diperdagangkan."),
-    "TEBAL": st.column_config.TextColumn(
-        help="Ukuran Amihud: TIPIS < 10 M · SEDANG 10-50 M · TEBAL 50-200 M · "
-             "SANGAT TEBAL > 200 M. Ini perbandingan antar saham, BUKAN biaya yang "
-             "dibutuhkan untuk menggerakkan harga."),
-    "HARGA": st.column_config.NumberColumn(format="%.0f"),
-    "N": st.column_config.NumberColumn(format="%.2f", help="Rata-rata gerak harian 20 hari"),
-    "JARAK": st.column_config.NumberColumn(format="%.2f%%", help="Jarak harga ke level tembus"),
-    "VOL": st.column_config.NumberColumn(format="%.2fx", help="Volume hari ini / rata-rata 20 hari"),
-    "1 UNIT": st.column_config.NumberColumn(format="%d lot"),
-    "NILAI UNIT": st.column_config.NumberColumn(format="%.0f"),
-    "SL 2N": st.column_config.NumberColumn(format="%.1f"),
-    "RUGI 1 UNIT": st.column_config.NumberColumn(format="%.0f"),
-    "% KAS": st.column_config.NumberColumn(format="%.1f%%"),
-}
-
-
-def tampil(sub):
-    t = sub[URUT].rename(columns=KOLOM).copy()
-    t["JARAK"] = t["JARAK"] * 100
-    t["LARI SEJAK"] = t["LARI SEJAK"] * 100
-    t["TEMBUS"] = t["TEMBUS"].apply(
-        lambda v: "-" if pd.isna(v) else ("hari ini" if v == 0 else f"{int(v)} hari lalu"))
-    return t
-
-
-def tampil_ringkas(sub):
-    """Tabel untuk daftar yang belum tembus: tiga kolom kesegaran dilepas."""
-    t = tampil(sub)
-    return t.drop(columns=["KESEGARAN", "TEMBUS", "LARI SEJAK"])
-
-
-def kartu(sub, kas_bebas):
-    """Satu blok per saham — muat dalam satu tangkapan layar HP."""
-    gaya = {"SEGAR": ("kartu-segar", "tag-segar"),
-            "MASIH OK": ("kartu-ok", "tag-ok"),
-            "TERTINGGAL": ("kartu-tinggal", "tag-tinggal"),
-            "-": ("", "tag-ok")}
-    rp = lambda v: f"{v:,.0f}".replace(",", ".")
-    blok = []
-    for _, r in sub.iterrows():
-        kb, kt = gaya.get(r["kesegaran"], ("", "tag-ok"))
-        if pd.isna(r["hari_sejak"]):
-            kapan = "belum tembus"
-        elif r["hari_sejak"] == 0:
-            kapan = "tembus hari ini"
-        else:
-            kapan = f"tembus {int(r['hari_sejak'])} hari lalu &middot; lari +{r['lari']*100:.1f}%"
-        muat = ("" if r["muat"] == "YA"
-                else " <span style='color:#ff8f8f'>&middot; TIDAK MUAT KAS</span>")
-        blok.append(f"""<div class="kartu {kb}">
-  <div class="kartu-kepala">
-    <span class="kartu-kode">{r['kode']}</span>
-    <span class="kartu-tag {kt}">{'' if r['kesegaran'] == '-' else r['kesegaran']} &nbsp;{kapan}</span>
-  </div>
-  <div class="kartu-baris">
-    Harga <b>{rp(r['harga'])}</b> &middot; N <b>{r['N']:.2f}</b> &middot;
-    tertinggi20 <b>{rp(r['tinggi20'])}</b> ({r['jarak']*100:+.2f}%) &middot;
-    vol <b>{r['vol_rasio']:.2f}x</b><br>
-    <span class="kartu-unit">1 unit {int(r['unit_lot'])} lot = Rp{rp(r['nilai_unit'])}</span>
-    ({r['pct_kas']:.1f}% kas){muat}<br>
-    <span class="kartu-sl">SL 2N {r['sl_2n']:.1f}</span> &middot;
-    rugi 1 unit <b>Rp{rp(r['rugi_unit'])}</b> &middot;
-    keluar10H <b>{rp(r['rendah10'])}</b><br>
-    Transaksi/hari <b>Rp{r.get('turn_med_m', 0):.2f} M</b> &middot;
-    free float <b>{f"{r['ff']:.0f}%" if r.get('ff') else '-'}</b> &middot;
-    <b>{r.get('bobot', '?')}</b><br>
-    <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
-  </div>
-</div>""")
-    return "".join(blok)
-
-
-def kartu_wyckoff(sub, status):
-    """Kartu watchlist SPRING.
-
-    status: "siap_tembus" | "siap_pantau" | "cek_broker"
-        siap_*      -> tier SIAP (5/5 syarat termasuk volume tinggi, absorption klasik)
-        cek_broker  -> tier volume sepi (4/5 syarat, quiet accumulation) -- wajib cek
-                       gauge Broker Action (Big Dist <-> Big Acc) di Stockbit manual
-                       sebelum dianggap kandidat, berapa pun status tembusnya.
-    """
-    rp = lambda v: f"{v:,.0f}".replace(",", ".")
-    gaya = {
-        "siap_tembus": ("kartu-wyckoff-siap", "tag-wyckoff-siap", "SUDAH TEMBUS"),
-        "siap_pantau": ("kartu-wyckoff-siap", "tag-wyckoff-siap", "BELUM TEMBUS"),
-        "cek_broker": ("kartu-wyckoff-cek", "tag-wyckoff-cek", "CEK BROKER FLOW"),
-    }
-    kelas, tag, label_dasar = gaya[status]
-    blok = []
-    for _, r in sub.iterrows():
-        muat = ("" if r["muat_spring"] == "YA"
-                else " <span style='color:#ff8f8f'>&middot; TIDAK MUAT KAS SPRING</span>")
-        if status == "siap_tembus":
-            status_teks = "TEMBUS HARI INI" if r.get("hari_sejak") == 0 else label_dasar
-        elif status == "cek_broker":
-            tembus_teks = "sudah tembus" if r.get("tembus") else "belum tembus"
-            status_teks = f"{label_dasar} &middot; {tembus_teks}"
-        else:
-            status_teks = label_dasar
-        blok.append(f"""<div class="kartu {kelas}">
-  <div class="kartu-kepala">
-    <span class="kartu-kode">{r['kode']}</span>
-    <span class="kartu-tag {tag}">{status_teks}</span>
-  </div>
-  <div class="kartu-baris">
-    Harga <b>{rp(r['harga'])}</b> &middot; puncak150 <b>{rp(r['tertinggi_puncak'])}</b>
-    (rally +{r['rally_pct']*100:.0f}% &middot; turun {r['turun_pct']*100:.0f}%)<br>
-    Sideways <b>{int(r['hari_sejak_puncak'])} hari</b> &middot;
-    range15H <b>{r['range15_pct']*100:.1f}%</b> &middot;
-    volMA20/50 <b>{r['vol_rasio_ma']:.2f}x</b><br>
-    <span class="kartu-unit">Masuk (tertinggi20) <b>{rp(r['tinggi20'])}</b></span> &middot;
-    <span class="kartu-sl">keluar (terendah10) <b>{rp(r['rendah10'])}</b></span><br>
-    N <b>{r['N']:.2f}</b> &middot; SL 2N <b>{r['sl_2n']:.1f}</b> &middot;
-    <span class="kartu-unit">usulan (referensi) {int(r['unit_lot_spring'])} lot = Rp{rp(r['nilai_unit_spring'])}</span>
-    ({r['pct_kas_spring']:.1f}% kas){muat}<br>
-    <span style="color:#7c8a94">Sizing aktual sesuai insting — catat lot rekomendasi vs lot aktual di jurnal</span><br>
-    <span style="color:#7c8a94">{r['grup']} &middot; {r['sektor']}</span>
-  </div>
-</div>""")
-    return "".join(blok)
-
-
-urut_segar = {"SEGAR": 0, "MASIH OK": 1, "TERTINGGAL": 2}
-if "bobot" in d.columns and bobot_dipakai:
-    d = d[d["bobot"].isin(bobot_dipakai)]
-    if d.empty:
-        st.warning("Tidak ada saham yang cocok dengan bobot pasar yang dipilih.")
+    if ihsg["fase"] == "NORMAL" or ihsg["trough_date"] is None:
+        st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
         st.stop()
 
-tab1, tab2 = st.tabs(["🐢 TURTLE BOARD", "🌀 WYCKOFF SPRING"])
+    with st.spinner("Menarik data saham universe..."):
+        harga_map = ambil_universe(tuple(ALL_TICKERS))
 
-with tab1:
-    sinyal = d[d["tembus"]].copy()
-    if not sinyal.empty:
-        sinyal["_u"] = sinyal["kesegaran"].map(urut_segar).fillna(3)
-        sinyal = sinyal.sort_values(["_u", "lari"], ascending=[True, True])
-    dekat = d[(~d["tembus"]) & (d["jarak"] >= -ambang_dekat / 100)].sort_values("jarak", ascending=False)
+    if not harga_map:
+        st.warning("Gagal menarik data saham (Tahap 2-4) dari Yahoo Finance saat ini. "
+                  "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
+        st.stop()
 
-    st.markdown(f"<h3 style='font-family:Orbitron;color:#00ffcc;font-size:16px;letter-spacing:2px'>"
-                f"SINYAL MASUK &nbsp;—&nbsp; {len(sinyal)} SAHAM</h3>", unsafe_allow_html=True)
+    # --- Tahap 2: panel berjenjang + bar horizontal ranking sektor, menggantikan
+    # daftar titik-titik "#1 Sektor — return% (n saham) · status".
+    sektor = status_sektor(harga_map, ihsg["trough_date"])
+    sektor_top = sektor[0]["sektor"] if sektor else "-"
+    st.markdown(f"""
+    <div class="rs-panel">
+      <div class="rs-label">🏆 Sektor teratas</div>
+      <div class="rs-angka" style="font-size:24px">{sektor_top}</div>
+      <div class="rs-sub">{len(sektor)} sektor dipantau</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if sektor:
+        max_ret = max(abs(s["return"]) for s in sektor) or 1
+        bars_html = ""
+        for s in sektor:
+            lebar = min(100, abs(s["return"]) / max_ret * 100)
+            titik = "🟢" if s["bergerak"] else "⚪"
+            bars_html += f"""<div class="rs-sektor-row">
+              <span class="rs-sektor-nama">{titik} #{s['ranking']} {s['sektor']}</span>
+              <div class="rs-sektor-bar-bg"><div class="rs-sektor-bar-isi" style="width:{lebar:.0f}%"></div></div>
+              <span class="rs-sektor-nilai">{s['return']:+.1f}%</span>
+            </div>"""
+        st.markdown(bars_html, unsafe_allow_html=True)
+    with st.expander("Referensi historis sektor tercepat"):
+        st.caption(f"Sektor yang biasanya paling cepat bergerak di fase bottom-rebound adalah "
+                  f"{', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
+                  f"tapi pola tiap siklus bisa beda, lihat ranking live di atas.")
 
-    if sinyal.empty:
-        st.markdown(f'<div class="kosong"><div class="kosong-judul">TIDAK ADA SINYAL</div>'
-                    f'<div class="kosong-sub">Tidak ada saham yang menembus tertinggi {p_masuk} hari '
-                    f'hari ini.<br>Ini keadaan normal — sebagian besar hari memang begitu.<br>'
-                    f'Catat tanggal ini di jurnal dengan keterangan "tidak ada sinyal".</div></div>',
-                    unsafe_allow_html=True)
-    else:
-        if mode_tampil.startswith("Kartu"):
-            st.markdown(kartu(sinyal, kas), unsafe_allow_html=True)
+    ihsg_beta_series = ambil_ihsg_untuk_beta()
+    sector_return_map = {s["sektor"]: s["return"] for s in sektor}
+
+    # --- Tahap 3
+    st.subheader("Kandidat emiten")
+    kandidat = []
+    for sektor_nama, tickers in SECTOR_BASKETS.items():
+        sector_avg = sector_return_map.get(sektor_nama, 0)
+        if sector_avg <= 0:
+            continue
+        dd_values, der_values, market_caps, infos, metrics_map, betas = [], [], {}, {}, {}, {}
+        for t in tickers:
+            m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
+            if m is None:
+                continue
+            metrics_map[t] = m
+            dd_values.append(m["max_dd"])
+            info = ambil_info(t)
+            infos[t] = info
+            if info.get("marketCap"):
+                market_caps[t] = info["marketCap"]
+            if sektor_nama not in SEKTOR_FINANSIAL and info.get("debtToEquity"):
+                der_values.append(info["debtToEquity"])
+            if t in harga_map and len(ihsg_beta_series) > 0:
+                betas[t] = hitung_beta(harga_map[t]["Close"], ihsg_beta_series)
+        sector_median_dd = float(np.median(dd_values)) if dd_values else 0
+        sector_der_median = float(np.median(der_values)) if der_values else None
+        for t, m in metrics_map.items():
+            gate = gerbang_keras(t, m, sector_median_dd)
+            penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(
+                t, infos.get(t, {}), sector_der_median, market_caps, betas.get(t))
+            skor, tier = skor_dan_tier(m, gate, penalty)
+            kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
+                             "gate": gate, "penalty": penalty, "m": m})
+
+    kandidat.sort(key=lambda c: -c["skor"])
+
+    with st.spinner("Cek berita terbaru untuk kandidat teratas..."):
+        for c in kandidat:
+            if c["tier"] in ("kuat", "menunggu"):
+                rss = cek_rss_negatif(c["ticker"])
+                c["rss"] = rss
+                if rss["negatif"]:
+                    c["tier"] = "tidak_lolos"
+                    c["gate"] = c["gate"] + [f"RSS negatif ({rss['tanggal']}): {rss['judul']}"]
+                    c["skor"] = 0.0
+
+    eq = bobot_ekuitas(kandidat)
+    shown_kuat = [c for c in kandidat if c["tier"] == "kuat"]
+    shown_menunggu = [c for c in kandidat if c["tier"] == "menunggu"]
+
+    def render_kartu_kuat(c):
+        """Kartu Tier Kuat -- radar jadi elemen utama, badge berwarna sesuai token
+        (amber = all-in, krem pudar = tahan/kandidat), bukan teks emoji polos."""
+        if eq["pilihan"] == c["ticker"]:
+            badge_html = '<span class="rs-badge rs-badge-allin">● ALL-IN</span>'
+        elif c["ticker"] in eq.get("menunggu", []):
+            badge_html = '<span class="rs-badge rs-badge-tahan">CASH DITAHAN</span>'
         else:
-            st.dataframe(tampil(sinyal), use_container_width=True, hide_index=True,
-                         column_config=KONF, height=min(60 + 35 * len(sinyal), 420))
-        muat = sinyal[sinyal["muat"] == "YA"]
-        n_segar = int((sinyal["kesegaran"] == "SEGAR").sum())
-        n_tinggal = int((sinyal["kesegaran"] == "TERTINGGAL").sum())
-        st.caption(f"{len(muat)} dari {len(sinyal)} muat di kas Rp{kas:,.0f}".replace(",", ".") +
-                   f" · {n_segar} tembus hari ini · {n_tinggal} sudah tertinggal.")
-        if n_tinggal:
-            st.markdown(
-                f"""<div class="catatan"><b>{n_tinggal} saham berlabel TERTINGGAL.</b>
-    Mereka menembus beberapa hari lalu dan harganya sudah lari jauh setelah itu. Sinyalnya masih
-    menyala, tapi stop 2N-mu akan diukur dari harga yang sudah naik — risiko rupiahnya sama,
-    entry-nya jauh lebih buruk. Turtle masuk di HARI tembus, bukan belakangan.</div>""",
-                unsafe_allow_html=True)
+            badge_html = '<span class="rs-badge rs-badge-kandidat">KANDIDAT</span>'
+        m = c["m"]
+        with st.container(border=True):
+            col1, col2 = st.columns([2, 1])
+            col1.markdown(f"### {c['ticker']}")
+            col2.markdown(f"<div style='text-align:right;padding-top:14px'>{badge_html}</div>",
+                          unsafe_allow_html=True)
+            render_radar(hitung_dimensi_radar(c), c["ticker"])
+            if eq["pilihan"] == c["ticker"]:
+                st.line_chart(m["harga_20h"], height=100)
+            with st.expander("Detail"):
+                candle_txt = {True: "🟩 hijau", False: "🟥 merah", None: "?"}[m["candle_hijau"]]
+                lari_txt = f" · Lari {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
+                st.caption(f"{c['sektor']} · Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
+                          f"{candle_txt}{lari_txt} · Rp{m['value_sesi_ini']/1e9:.0f}M")
+                if c["penalty"]:
+                    st.caption(f"⚠️ {', '.join(c['penalty'])}")
+                if c.get("rss", {}).get("gagal"):
+                    st.caption("📡 RSS gagal dicek")
+                elif c.get("rss") and c["rss"]["judul"]:
+                    emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
+                    st.caption(f"📡 {emoji_sentimen} ({c['rss']['tanggal']}) {c['rss']['judul']}")
+                elif "rss" in c:
+                    st.caption("📡 Tidak ada berita ditemukan")
 
-    st.markdown(f"<h3 style='font-family:Orbitron;color:#3d7fff;font-size:16px;letter-spacing:2px;"
-                f"margin-top:22px'>MENDEKATI TEMBUS &nbsp;—&nbsp; {len(dekat)} SAHAM</h3>",
-                unsafe_allow_html=True)
-    st.caption(f"Belum sinyal. Jangan dibeli. Jarak maksimal {ambang_dekat:.1f}% dari level tembus. "
-               f"Peluang tembus besok menurut uji 1 tahun: jarak 1% = 25%, 2% = 16%, 3% = 11%, "
-               f"5% = 7%, 8% = 4%.")
-    if dekat.empty:
-        st.info(f"Tidak ada yang dalam jarak {ambang_dekat:.1f}% dari level tembus.")
-    else:
-        if mode_tampil.startswith("Kartu"):
-            sub = dekat if maks_kartu == 0 else dekat.head(int(maks_kartu))
-            st.markdown(kartu(sub, kas), unsafe_allow_html=True)
-            if len(sub) < len(dekat):
-                st.caption(f"{len(sub)} teratas dari {len(dekat)}. "
-                           f"Setel 'Maksimal kartu' ke 0 di sidebar untuk menampilkan semua.")
+    def render_kartu_ringkas(c):
+        m = c["m"]
+        candle_txt = {True: "🟩", False: "🟥", None: "?"}[m["candle_hijau"]]
+        with st.container(border=True):
+            st.write(f"**{c['ticker']}** · {c['sektor']}")
+            st.caption(f"Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · {candle_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
+
+    if not shown_kuat and not shown_menunggu:
+        st.info("Tidak ada kandidat lolos gerbang saat ini.")
+
+    if shown_kuat:
+        for c in shown_kuat:
+            render_kartu_kuat(c)
+
+    if shown_menunggu:
+        with st.expander(f"Tier menunggu konfirmasi · {len(shown_menunggu)} saham (belum ada sinyal partisipasi)"):
+            for c in shown_menunggu:
+                render_kartu_ringkas(c)
+
+    excluded_rss = [c for c in kandidat if c.get("rss", {}).get("negatif")]
+    if excluded_rss:
+        with st.expander(f"⛔ {len(excluded_rss)} kandidat dibuang karena RSS negatif -- review manual di sini"):
+            for c in excluded_rss:
+                st.write(f"**{c['ticker']}** ({c['rss']['tanggal']})")
+                st.caption(c["rss"]["judul"])
+
+    # --- Tahap 4: panel berjenjang untuk status bobot ekuitas
+    st.subheader("Tahap 4 — Bobot Ekuitas")
+    status_label = {"all_in": "All-in", "cash_ditahan": "Cash Ditahan", "cash_menganggur": "Cash Menganggur"}
+    status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
+    eq_class = "" if eq["status"] == "all_in" else ""
+    st.markdown(f"""
+    <div class="rs-panel {eq_class}">
+      <div class="rs-label">{status_icon.get(eq['status'], '')} Status</div>
+      <div class="rs-angka" style="font-size:22px">{status_label.get(eq['status'], eq['status'])}</div>
+      <div class="rs-sub">{eq['detail']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # --- Manajemen Posisi Aktif (SL keras + trailing-lock + override regime)
+    if posisi:
+        st.subheader("Manajemen Posisi Aktif")
+        p_ticker, p_entry, p_tgl = posisi["ticker"], posisi["harga_beli"], posisi["tanggal_beli"]
+        if p_ticker in harga_map:
+            harga_posisi = harga_map[p_ticker]["Close"]
         else:
-            st.dataframe(tampil_ringkas(dekat), use_container_width=True, hide_index=True,
-                         column_config=KONF, height=min(60 + 35 * len(dekat), 380))
+            data_p = ambil_universe((p_ticker,))
+            harga_posisi = data_p.get(p_ticker, {}).get("Close") if data_p else None
+            if harga_posisi is None:
+                harga_posisi = pd.Series(dtype=float)
 
-    st.markdown("""<div class="catatan">
-    <b>Aplikasi ini tidak tahu apa yang sudah kamu pegang.</b> Saham yang sudah tembus akan terus
-    muncul selama harganya masih di atas level itu — bisa berhari-hari. Cocokkan dulu dengan sheet
-    OBERLIN di jurnal sebelum membeli, supaya tidak membeli nama yang sama dua kali. Penambahan
-    unit hanya sah di kelipatan 0,5N di atas harga masuk pertama, bukan setiap kali sinyal masih menyala.
-    </div>""", unsafe_allow_html=True)
-
-    st.download_button("Unduh hasil pindai Turtle (CSV)",
-                       d[URUT].rename(columns=KOLOM).to_csv(index=False).encode(),
-                       f"turtle_{datetime.now(WIB).strftime('%Y%m%d')}.csv", "text/csv",
-                       key="dl_turtle")
-
-with tab2:
-    st.markdown(f"""<div class="aturan" style="border-left-color:#a855f7">
-    <b>Dua tahap, bukan satu keputusan.</b> Saham harus lolos empat syarat struktur harga Wyckoff DULU
-    (re-akumulasi), baru dicek sinyal Turtle. Watchlist di bawah bukan rekomendasi beli — cuma daftar
-    kandidat yang strukturnya cocok. Ekuitas dan kas di sini SPRING (akun FUNDAMENTAL), terpisah dari
-    OBERLIN.<br>
-    <b>Syarat struktur (wajib semua):</b> rally &ge;{rally_min*100:.0f}% sebelum puncak (jendela 150 hari)
-    &middot; turun &ge;{turun_min*100:.0f}% dari puncak &middot; sideways &ge;{sideways_min_hari} hari
-    &middot; range 15H &le;{range_maks*100:.0f}%<br>
-    <b>Volume MA20 &ge;{volume_mult:.1f}x MA50 menentukan TIER, bukan gerbang lolos/gagal:</b>
-    volume tinggi &rarr; tier SIAP (absorption klasik). Volume rendah &rarr; tier CEK BROKER FLOW
-    (bisa jadi quiet accumulation — big player ngumpulin barang tanpa bikin volume meledak, wajib
-    dikonfirmasi manual lewat gauge Broker Action di Stockbit sebelum dianggap kandidat).
-    </div>""", unsafe_allow_html=True)
-
-    siap = d[d["tier_siap"]].copy()
-    cek_broker = d[d["tier_cek_broker"]].copy()
-
-    if siap.empty and cek_broker.empty:
-        st.markdown('<div class="kosong"><div class="kosong-judul">TIDAK ADA KANDIDAT</div>'
-                    '<div class="kosong-sub">Tidak ada saham yang lolos empat syarat struktur Wyckoff '
-                    'hari ini.<br>Ini keadaan normal — coba longgarkan ambang di sidebar kalau mau lihat '
-                    'lebih banyak, atau tunggu hari lain.</div></div>', unsafe_allow_html=True)
-    else:
-        siap_tembus = siap[siap["tembus"]].sort_values("lari")
-        siap_pantau = siap[~siap["tembus"]].sort_values("jarak", ascending=False)
-
-        st.markdown(f"<h3 style='font-family:Orbitron;color:#c084fc;font-size:16px;letter-spacing:2px'>"
-                    f"SIAP — SUDAH TEMBUS &nbsp;—&nbsp; {len(siap_tembus)} SAHAM</h3>",
-                    unsafe_allow_html=True)
-        if siap_tembus.empty:
-            st.info("Belum ada kandidat tier SIAP yang sekaligus tembus tertinggi 20 hari hari ini.")
+        harga_sejak_beli = harga_posisi[harga_posisi.index >= p_tgl]
+        if len(harga_sejak_beli) == 0:
+            st.warning(f"Tidak ada data harga {p_ticker} sejak tanggal beli -- cek ticker/tanggal, atau data belum tersedia.")
         else:
-            st.markdown(kartu_wyckoff(siap_tembus, "siap_tembus"), unsafe_allow_html=True)
-            muat_s = siap_tembus[siap_tembus["muat_spring"] == "YA"]
-            st.caption(f"{len(muat_s)} dari {len(siap_tembus)} muat di kas SPRING Rp{kas_spring:,.0f}"
-                       .replace(",", "."))
+            harga_now_p = float(harga_sejak_beli.iloc[-1])
+            peak_p = float(harga_sejak_beli.max())
+            return_now = (harga_now_p - p_entry) / p_entry
+            peak_return = (peak_p - p_entry) / p_entry
+            sl_keras_harga = p_entry * (1 + SL_KERAS_PCT)
+            trailing_aktif = peak_return >= TRAILING_AKTIF_GAIN
+            trailing_floor = p_entry * (1 + TRAILING_LOCK_PCT * peak_return) if trailing_aktif else None
+            regime_bear = ihsg["fase"] == "BEAR"
 
-        st.markdown(f"<h3 style='font-family:Orbitron;color:#7c3aed;font-size:16px;letter-spacing:2px;"
-                    f"margin-top:22px'>SIAP — PANTAU, BELUM TEMBUS &nbsp;—&nbsp; {len(siap_pantau)} SAHAM</h3>",
-                    unsafe_allow_html=True)
-        if siap_pantau.empty:
-            st.info("Tidak ada kandidat tier SIAP lain yang masih menunggu tembus.")
-        else:
-            st.markdown(kartu_wyckoff(siap_pantau, "siap_pantau"), unsafe_allow_html=True)
+            if harga_now_p <= sl_keras_harga:
+                rekom, alasan = "🔴 EXIT", f"SL keras {SL_KERAS_PCT*100:.0f}% kena (harga {harga_now_p:.0f} <= {sl_keras_harga:.0f})"
+            elif regime_bear:
+                rekom, alasan = "🔴 EXIT", "IHSG sudah balik ke fase BEAR -- override regime, keluar terlepas status trailing-lock"
+            elif trailing_aktif and harga_now_p <= trailing_floor:
+                rekom, alasan = "🔴 EXIT", f"Trailing-lock kena (harga {harga_now_p:.0f} <= floor {trailing_floor:.0f})"
+            elif trailing_aktif:
+                rekom, alasan = "🟢 HOLD", f"Trailing-lock aktif, floor saat ini {trailing_floor:.0f}"
+            else:
+                rekom, alasan = "🟡 HOLD (belum ada proteksi profit)", f"Gain {return_now*100:+.1f}%, trailing-lock aktif di gain >={TRAILING_AKTIF_GAIN*100:.0f}%. SL keras di {sl_keras_harga:.0f}."
 
-        st.markdown(f"<h3 style='font-family:Orbitron;color:#eab308;font-size:16px;letter-spacing:2px;"
-                    f"margin-top:22px'>CEK BROKER FLOW — VOLUME SEPI &nbsp;—&nbsp; {len(cek_broker)} SAHAM</h3>",
-                    unsafe_allow_html=True)
-        st.caption("Struktur harga cocok, tapi volume di bawah ambang. Bisa quiet accumulation, bisa juga "
-                   "memang sepi peminat. Cek gauge Broker Action (Big Dist <-> Big Acc) di Stockbit untuk "
-                   "tiap kode sebelum menganggap ini kandidat sungguhan.")
-        if cek_broker.empty:
-            st.info("Tidak ada kandidat di tier ini hari ini.")
-        else:
-            st.markdown(kartu_wyckoff(cek_broker, "cek_broker"), unsafe_allow_html=True)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Harga sekarang", f"{harga_now_p:.0f}", f"{return_now*100:+.1f}%")
+            c2.metric("SL keras", f"{sl_keras_harga:.0f}")
+            c3.metric("Trailing floor", f"{trailing_floor:.0f}" if trailing_floor else "belum aktif")
+            st.write(f"**{rekom}**")
+            st.caption(alasan)
 
-        gabungan = pd.concat([siap, cek_broker])
-        st.download_button("Unduh watchlist Wyckoff SPRING (CSV)",
-                           gabungan.to_csv(index=False).encode(),
-                           f"wyckoff_spring_{datetime.now(WIB).strftime('%Y%m%d')}.csv", "text/csv",
-                           key="dl_wyckoff")
+    st.divider()
+    st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
+              "Universe saat ini: basket representatif per sektor (belum universe 840 emiten penuh). "
+              "Data historis, bukan sinyal beli/jual. Bukan nasihat keuangan.")
 
-    st.markdown("""<div class="catatan" style="border-left-color:#a855f7">
-    <b>Ini prefilter mekanis, bukan konfirmasi visual.</b> Empat syarat struktur di atas tidak bisa
-    membedakan re-akumulasi asli dari distribusi terselubung — itu kerjanya mata, bukan rumus. Cek chart
-    tiap kandidat sebelum masuk, terutama yang levelnya (tertinggi 20H / terendah 10H) berdekatan dengan
-    harga sekarang. Untuk tier CEK BROKER FLOW, wajib cek gauge Broker Action di Stockbit dulu.<br><br>
-    <b>Sizing bukan aturan wajib.</b> Angka "usulan (referensi)" di tiap kartu dihitung dari rumus lama
-    (1% ekuitas SPRING ÷ N), tapi keputusan berapa lot yang dibeli sekarang murni insting kamu.
-    Wajib dicatat di jurnal: lot rekomendasi aplikasi, lot aktual dibeli, dan alasan bobotnya
-    (termasuk kesan tape reading kalau itu yang mendasari) — supaya nanti bisa dievaluasi.
-    </div>""", unsafe_allow_html=True)
-
-st.caption("Data Yahoo Finance, tertunda 10-15 menit · N dihitung dengan Wilder 20 hari "
-           "sesuai rumus asli Turtle · bukan rekomendasi investasi")
+tampilkan_screener()
