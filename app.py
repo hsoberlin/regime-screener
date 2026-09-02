@@ -252,10 +252,33 @@ def ambil_universe():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def ambil_harga(tickers, periode="1y", batch=80):
-    """Unduh bar harian secara batch."""
+    """Unduh bar harian secara batch, dengan retry individual untuk yang gagal di batch."""
     keluar = {}
     for i in range(0, len(tickers), batch):
         chunk = [f"{t}.JK" for t in tickers[i:i + batch]]
+        try:
+            df = yf.download(chunk, period=periode, interval="1d", progress=False,
+                             auto_adjust=False, group_by="ticker", threads=True)
+        except Exception:
+            continue
+        for sym in chunk:
+            kode = sym[:-3]
+            try:
+                sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
+                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                if len(sub) >= 60:
+                    keluar[kode] = sub
+            except Exception:
+                continue
+
+    # retry batch kecil utk kode yg gagal/kurang di putaran pertama -- yf.download kadang
+    # drop sebagian kode dalam batch besar meski datanya sebenarnya tersedia. Batch kecil
+    # (15 kode) mengurangi kemungkinan drop dobel tanpa bikin scan jadi lambat banget.
+    gagal = [t for t in tickers if t not in keluar]
+    retry_batch = 15
+    for i in range(0, len(gagal), retry_batch):
+        chunk_kode = gagal[i:i + retry_batch]
+        chunk = [f"{t}.JK" for t in chunk_kode]
         try:
             df = yf.download(chunk, period=periode, interval="1d", progress=False,
                              auto_adjust=False, group_by="ticker", threads=True)
