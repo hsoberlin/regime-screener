@@ -26,9 +26,11 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 st.set_page_config(page_title="Regime Screener", layout="centered")
+
+WIB = timezone(timedelta(hours=7))
 
 # =====================================================================
 # TEMA VISUAL -- Opsi B: identitas terpisah dari Turtle Board
@@ -975,7 +977,9 @@ def tampilkan_screener():
             st.caption(alasan)
 
     st.divider()
-    st.caption(f"Diperbarui: {datetime.now().strftime('%d %b %Y %H:%M')} · "
+    st.caption(f"Diperbarui: {datetime.now(WIB).strftime('%d %b %Y %H:%M')} WIB · "
+              "Harga IHSG & saham di-cache ≤15 menit, data fundamental (DER/marketCap) ≤1 jam -- "
+              "jam di atas itu waktu render halaman, bukan jaminan data sesegar itu. "
               "Universe saat ini: basket representatif per sektor (belum universe 840 emiten penuh). "
               "Data historis, bukan sinyal beli/jual. Bukan nasihat keuangan.")
 
