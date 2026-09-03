@@ -182,9 +182,21 @@ BERAT_NAIK_DER_MULTIPLIER = 1.5
 BERAT_NAIK_BETA_THRESHOLD = 0.3
 BERAT_NAIK_TOP_N_MCAP = 2
 BERAT_NAIK_PENALTY = 0.5
-PARTICIPATION_VOL_RATIO = 4.0
-PARTICIPATION_VALUE_IDR = 100_000_000_000
 MODAL_EQUITAS = 20_000_000
+
+# --- Gerbang eksekusi Tahap 4 -- revisi 3 Sep 2026 ---
+# Dasar: O'Neil (How to Make Money in Stocks) -- breakout genuine dikonfirmasi basis
+# rapi + closing kuat + volume, bukan volume sendirian. Amihud (Illiquidity and Stock
+# Returns, 2002) + praktik quant standar -- lantai likuiditas absolut DAN relatif ke
+# grup pembanding sekaligus, bukan salah satu saja.
+BASIS_LOOKBACK = 12             # hari, jendela basis SEBELUM hari eksekusi (exclude hari ini)
+BASIS_KETAT_MAKS = 0.08         # (high tertinggi - low terendah) / low terendah di jendela itu
+CLOSE_POSISI_MIN = 0.75         # closing harus di 75% teratas dari range high-low hari itu
+PARTICIPATION_VOL_RATIO = 1.75  # turun dari 4.0 -- sekarang konfirmasi TERAKHIR, bukan gerbang
+                                 # tunggal, karena basis+closing sudah membuktikan struktur duluan
+LIKUIDITAS_LANTAI_ABSOLUT = 2_000_000_000   # Rp2 miliar, jaring pengaman minimum mutlak
+LIKUIDITAS_MULTIPLIER_SEKTOR = 0.5          # atau >=50% median likuiditas 20h sektornya sendiri
+LIKUIDITAS_MIN_N_SEKTOR = 5                 # median sektor baru dipercaya kalau >=5 saham valid
 
 # --- Manajemen risiko posisi (30 Agu 2026, respons review Claude Project lain) ---
 LARI_HARI_INI_MAKS = 0.05      # skip kandidat kalau harga sudah lari >5% dari open hari itu
@@ -313,7 +325,7 @@ def ambil_universe(tickers, periode="500d", batch=80):
             kode = sym[:-3]
             try:
                 sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Open", "Close", "Volume"]].dropna()
+                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
                 if len(sub) >= 25:
                     keluar[kode] = sub
             except Exception:
@@ -536,6 +548,8 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
     df = harga_map[ticker]
     close, volume = df["Close"], df["Volume"]
     open_ = df["Open"] if "Open" in df.columns else None
+    high_ = df["High"] if "High" in df.columns else None
+    low_ = df["Low"] if "Low" in df.columns else None
     if len(close) < 25:
         return None
     close_after = close[close.index >= trough_date]
@@ -550,15 +564,37 @@ def metrik_saham(harga_map, ticker, sector_avg, trough_date):
     low_prior = close.tail(40).head(20).min() if len(close) >= 40 else close.min()
     higher_low = low_recent > low_prior
     value_sesi_ini = float(close.iloc[-1] * volume.iloc[-1])
+    value_rata_20h = float((close * volume).tail(20).mean())
     roll_max = close.rolling(min(len(close), 750), min_periods=50).max()
     dd = (close - roll_max) / roll_max * 100
     max_dd = float(dd.min()) if not dd.isna().all() else 0.0
     candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
     lari_hari_ini = float((close.iloc[-1] - open_.iloc[-1]) / open_.iloc[-1]) if open_ is not None and open_.iloc[-1] > 0 else None
+
+    # --- basis rapi: rentang harga BASIS_LOOKBACK hari SEBELUM hari ini (exclude hari
+    # ini sendiri -- biar tidak sirkular dengan breakout yang mau dikonfirmasi) ---
+    rentang_basis = None
+    if high_ is not None and low_ is not None and len(high_) > BASIS_LOOKBACK:
+        jendela_high = high_.iloc[-(BASIS_LOOKBACK + 1):-1]
+        jendela_low = low_.iloc[-(BASIS_LOOKBACK + 1):-1]
+        low_terendah = float(jendela_low.min())
+        if low_terendah > 0:
+            rentang_basis = float((jendela_high.max() - low_terendah) / low_terendah)
+
+    # --- posisi closing dalam range high-low HARI INI -- close dekat high = kuat,
+    # close dekat low walau masih > open = lemah (candle_hijau lama tidak menangkap ini) ---
+    posisi_close = None
+    if high_ is not None and low_ is not None:
+        h_today, l_today = float(high_.iloc[-1]), float(low_.iloc[-1])
+        if h_today > l_today:
+            posisi_close = float((close.iloc[-1] - l_today) / (h_today - l_today))
+
     return {
         "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
-        "higher_low": higher_low, "value_sesi_ini": value_sesi_ini, "max_dd": max_dd,
+        "higher_low": higher_low, "value_sesi_ini": value_sesi_ini,
+        "value_rata_20h": value_rata_20h, "max_dd": max_dd,
         "candle_hijau": candle_hijau, "lari_hari_ini": lari_hari_ini,
+        "rentang_basis": rentang_basis, "posisi_close": posisi_close,
         "harga_20h": close.tail(20).tolist(), "volume_20h": volume.tail(20).tolist(),
     }
 
@@ -632,11 +668,20 @@ def hitung_dimensi_radar(c):
     else:
         sentimen_dim = 50  # belum dicek / tidak ada data -- netral, bukan 0
 
-    eksekusi_dim = min(60, m["vol_ratio_today"] / PARTICIPATION_VOL_RATIO * 60)
-    if m.get("candle_hijau") is True:
-        eksekusi_dim += 20
+    # eksekusi_dim -- direvisi 3 Sep 2026 mengikuti gerbang baru Tahap 4: basis rapi,
+    # closing kuat, volume (ambang turun 4x->1.75x karena sudah dikonfirmasi basis+closing
+    # duluan), lari hari ini. 25 poin tiap sinyal, bukan lagi 60/20/20 volume-sentris lama.
+    eksekusi_dim = 0.0
+    if m.get("rentang_basis") is not None:
+        if m["rentang_basis"] <= BASIS_KETAT_MAKS:
+            eksekusi_dim += 25
+        else:
+            eksekusi_dim += max(0, 25 * (1 - (m["rentang_basis"] - BASIS_KETAT_MAKS) / BASIS_KETAT_MAKS))
+    if m.get("posisi_close") is not None:
+        eksekusi_dim += 25 if m["posisi_close"] >= CLOSE_POSISI_MIN else 25 * max(0, m["posisi_close"] / CLOSE_POSISI_MIN)
+    eksekusi_dim += min(25, m["vol_ratio_today"] / PARTICIPATION_VOL_RATIO * 25)
     if m.get("lari_hari_ini") is not None and m["lari_hari_ini"] <= LARI_HARI_INI_MAKS:
-        eksekusi_dim += 20
+        eksekusi_dim += 25
     eksekusi_dim = max(0, min(100, eksekusi_dim))
 
     return {"Gap": round(gap_dim), "Partisipasi": round(part_dim),
@@ -673,41 +718,94 @@ def render_radar(dimensi, judul):
 # =====================================================================
 # TAHAP 4 -- BOBOT EKUITAS
 # =====================================================================
+def cek_gerbang_eksekusi(c):
+    """Gerbang eksekusi Tahap 4 -- berjenjang: basis rapi -> closing kuat -> volume
+    (konfirmasi terakhir, bukan gerbang tunggal) -> likuiditas (absolut DAN relatif
+    sektor) -> lari hari ini. FAIL-CLOSED: data tidak lengkap = gagal gerbang, bukan
+    lolos otomatis -- beda dari RSS yang fail-open, karena konsekuensi all-in ke saham
+    buruk jauh lebih mahal daripada kelewat satu sinyal (prinsip asimetri risiko).
+    Mengembalikan (lolos: bool, kategori_gagal: str|None, pesan: str|None)."""
+    m = c["m"]
+
+    if m.get("rentang_basis") is None or m["rentang_basis"] > BASIS_KETAT_MAKS:
+        r = m.get("rentang_basis")
+        r_txt = f"{r*100:.1f}%" if r is not None else "data tidak cukup"
+        return False, "basis", f"basis belum rapi (rentang {r_txt}, maks {BASIS_KETAT_MAKS*100:.0f}%)"
+
+    if m.get("posisi_close") is None or m["posisi_close"] < CLOSE_POSISI_MIN:
+        p = m.get("posisi_close")
+        p_txt = f"{p*100:.0f}%" if p is not None else "data tidak cukup"
+        return False, "closing", f"closing lemah (posisi {p_txt} dari range hari ini, min {CLOSE_POSISI_MIN*100:.0f}%)"
+
+    if m["vol_ratio_today"] < PARTICIPATION_VOL_RATIO:
+        return False, "volume", f"volume {m['vol_ratio_today']:.1f}x < {PARTICIPATION_VOL_RATIO:.2f}x"
+
+    if m["value_rata_20h"] < LIKUIDITAS_LANTAI_ABSOLUT:
+        return False, "likuiditas", (f"likuiditas rata\u00b220h Rp{m['value_rata_20h']/1e9:.1f}M "
+                                     f"< lantai Rp{LIKUIDITAS_LANTAI_ABSOLUT/1e9:.0f}M")
+
+    median_sektor = c.get("sektor_likuiditas_median")
+    if median_sektor is not None:
+        ambang_relatif = median_sektor * LIKUIDITAS_MULTIPLIER_SEKTOR
+        if m["value_rata_20h"] < ambang_relatif:
+            return False, "likuiditas", (f"likuiditas Rp{m['value_rata_20h']/1e9:.1f}M < "
+                                         f"{LIKUIDITAS_MULTIPLIER_SEKTOR*100:.0f}% median sektor "
+                                         f"(Rp{ambang_relatif/1e9:.1f}M)")
+
+    if m["lari_hari_ini"] is not None and m["lari_hari_ini"] > LARI_HARI_INI_MAKS:
+        return False, "lari", f"sudah lari {m['lari_hari_ini']*100:+.1f}% dari open (maks {LARI_HARI_INI_MAKS*100:.0f}%)"
+
+    return True, None, None
+
+
 def bobot_ekuitas(kandidat):
     hijau = [c for c in kandidat if c["tier"] == "kuat"]
     if not hijau:
         return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
-    lolos = [c for c in hijau
-             if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
-             and c["m"]["candle_hijau"] is True
-             and (c["m"]["lari_hari_ini"] is None or c["m"]["lari_hari_ini"] <= LARI_HARI_INI_MAKS)]
+
+    lolos, gagal = [], {}
+    for c in hijau:
+        ok, kategori, pesan = cek_gerbang_eksekusi(c)
+        if ok:
+            lolos.append(c)
+        else:
+            gagal.setdefault(kategori, []).append(c["ticker"])
+
     if not lolos:
-        vol_saja = [c["ticker"] for c in hijau
-                   if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
-                   and c["m"]["candle_hijau"] is False]
-        sudah_lari = [c["ticker"] for c in hijau
-                     if c["m"]["vol_ratio_today"] >= PARTICIPATION_VOL_RATIO
-                     and c["m"]["candle_hijau"] is True
-                     and c["m"]["lari_hari_ini"] is not None
-                     and c["m"]["lari_hari_ini"] > LARI_HARI_INI_MAKS]
-        detail = (f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos "
-                 f"(volume>={PARTICIPATION_VOL_RATIO:.0f}x DAN candle hijau DAN lari hari ini <={LARI_HARI_INI_MAKS*100:.0f}%).")
-        if vol_saja:
-            detail += f" {len(vol_saja)} sempat volume tinggi tapi candle merah ({', '.join(vol_saja)}) -- indikasi distribusi bukan akumulasi."
-        if sudah_lari:
-            detail += f" {len(sudah_lari)} sudah lari >{LARI_HARI_INI_MAKS*100:.0f}% hari ini ({', '.join(sudah_lari)}) -- risiko beli di puncak harian."
-        return {"status": "cash_ditahan", "detail": detail,
-               "pilihan": None, "menunggu": [c["ticker"] for c in hijau]}
+        label_kategori = {"basis": "basis belum rapi", "closing": "closing lemah",
+                          "volume": "volume kurang", "likuiditas": "likuiditas tipis",
+                          "lari": "sudah lari terlalu jauh"}
+        detail = (f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos gerbang eksekusi "
+                 f"(basis rapi \u2264{BASIS_KETAT_MAKS*100:.0f}% \u2192 closing \u2265{CLOSE_POSISI_MIN*100:.0f}% range \u2192 "
+                 f"volume \u2265{PARTICIPATION_VOL_RATIO:.2f}x \u2192 likuiditas cukup \u2192 lari \u2264{LARI_HARI_INI_MAKS*100:.0f}%).")
+        for kategori, tickers in gagal.items():
+            detail += f" {len(tickers)} kandas di {label_kategori.get(kategori, kategori)} ({', '.join(tickers)})."
+        return {"status": "cash_ditahan", "detail": detail, "pilihan": None,
+               "menunggu": [c["ticker"] for c in hijau]}
+
+    # --- tie-breaker: skor Tahap 3 -> basis paling rapi -> volume (Opsi A, 3 Sep 2026) ---
+    catatan_ramai = None
     if len(lolos) == 1:
         pilihan, alasan = lolos[0], "satu-satunya kandidat lolos eksekusi"
     else:
-        tanpa_penalti = [c for c in lolos if not c["penalty"]]
-        pool = tanpa_penalti if tanpa_penalti else lolos
-        pilihan = max(pool, key=lambda c: c["m"]["vol_ratio_today"])
-        kalah = [c["ticker"] for c in lolos if c["ticker"] != pilihan["ticker"]]
-        alasan = f"menang tie-breaker (vol {pilihan['m']['vol_ratio_today']:.1f}x) vs {', '.join(kalah)}"
-    return {"status": "all_in", "detail": alasan, "pilihan": pilihan["ticker"],
+        lolos_sorted = sorted(
+            lolos,
+            key=lambda c: (-c["skor"], c["m"]["rentang_basis"] or 1.0, -c["m"]["vol_ratio_today"])
+        )
+        pilihan = lolos_sorted[0]
+        kalah_list = [c["ticker"] for c in lolos_sorted[1:]]
+        alasan = (f"menang tie-breaker (skor {pilihan['skor']:.0f}, basis "
+                 f"{pilihan['m']['rentang_basis']*100:.1f}%) vs {', '.join(kalah_list)}")
+        if len(lolos) >= 3:
+            catatan_ramai = (f"{len(lolos)} kandidat lolos gerbang bareng hari ini -- jarang "
+                            "terjadi, layak dicermati manual apakah ini partisipasi pasar yang "
+                            "genuine luas atau gerbang kebetulan longgar hari ini.")
+
+    hasil = {"status": "all_in", "detail": alasan, "pilihan": pilihan["ticker"],
             "kalah": [c["ticker"] for c in lolos if c["ticker"] != pilihan["ticker"]]}
+    if catatan_ramai:
+        hasil["catatan"] = catatan_ramai
+    return hasil
 
 
 # =====================================================================
@@ -820,13 +918,15 @@ def tampilkan_screener():
         sector_avg = sector_return_map.get(sektor_nama, 0)
         if sector_avg <= 0:
             continue
-        dd_values, der_values, market_caps, infos, metrics_map, betas = [], [], {}, {}, {}, {}
+        dd_values, der_values, likuiditas_values = [], [], []
+        market_caps, infos, metrics_map, betas = {}, {}, {}, {}
         for t in tickers:
             m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
             if m is None:
                 continue
             metrics_map[t] = m
             dd_values.append(m["max_dd"])
+            likuiditas_values.append(m["value_rata_20h"])
             info = ambil_info(t)
             infos[t] = info
             if info.get("marketCap"):
@@ -837,13 +937,19 @@ def tampilkan_screener():
                 betas[t] = hitung_beta(harga_map[t]["Close"], ihsg_beta_series)
         sector_median_dd = float(np.median(dd_values)) if dd_values else 0
         sector_der_median = float(np.median(der_values)) if der_values else None
+        # Median likuiditas sektor -- cuma dipercaya kalau sampel cukup (>=5, prinsip
+        # robust-statistics: median dari sampel kecil rentan diguncang satu outlier).
+        sector_likuiditas_median = (float(np.median(likuiditas_values))
+                                    if len(likuiditas_values) >= LIKUIDITAS_MIN_N_SEKTOR else None)
         for t, m in metrics_map.items():
             gate = gerbang_keras(t, m, sector_median_dd)
             penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(
                 t, infos.get(t, {}), sector_der_median, market_caps, betas.get(t))
             skor, tier = skor_dan_tier(m, gate, penalty)
             kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
-                             "gate": gate, "penalty": penalty, "m": m})
+                             "gate": gate, "penalty": penalty, "m": m,
+                             "sektor_likuiditas_median": sector_likuiditas_median,
+                             "sektor_likuiditas_n": len(likuiditas_values)})
 
     kandidat.sort(key=lambda c: -c["skor"])
 
@@ -883,7 +989,12 @@ def tampilkan_screener():
                 candle_txt = {True: "🟩 hijau", False: "🟥 merah", None: "?"}[m["candle_hijau"]]
                 lari_txt = f" · Lari {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
                 st.caption(f"{c['sektor']} · Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                          f"{candle_txt}{lari_txt} · Rp{m['value_sesi_ini']/1e9:.0f}M")
+                          f"{candle_txt}{lari_txt} · Rp{m['value_sesi_ini']/1e9:.0f}M hari ini")
+                basis_txt = f"{m['rentang_basis']*100:.1f}%" if m.get("rentang_basis") is not None else "data kurang"
+                closing_txt = f"{m['posisi_close']*100:.0f}%" if m.get("posisi_close") is not None else "data kurang"
+                st.caption(f"Basis {basis_txt} (maks {BASIS_KETAT_MAKS*100:.0f}%) · "
+                          f"Closing {closing_txt} dari range (min {CLOSE_POSISI_MIN*100:.0f}%) · "
+                          f"Likuiditas rata²20h Rp{m['value_rata_20h']/1e9:.1f}M")
                 if c["penalty"]:
                     st.caption(f"⚠️ {', '.join(c['penalty'])}")
                 if c.get("rss", {}).get("gagal"):
@@ -932,6 +1043,8 @@ def tampilkan_screener():
       <div class="rs-sub">{eq['detail']}</div>
     </div>
     """, unsafe_allow_html=True)
+    if eq.get("catatan"):
+        st.warning(eq["catatan"])
 
     # --- Manajemen Posisi Aktif (SL keras + trailing-lock + override regime)
     if posisi:
