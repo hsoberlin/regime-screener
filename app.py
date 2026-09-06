@@ -7,7 +7,6 @@ Sistem penyaringan saham berbasis siklus:
 3. Tahap 2: Pembagian Keranjang (Keranjang 30% Breakout vs Keranjang 70% Retrace Oversold)
 
 Jalankan: streamlit run compounding_screener.py
-Kebutuhan library: streamlit yfinance pandas numpy plotly
 """
 
 import numpy as np
@@ -31,8 +30,8 @@ st.markdown("""
   --bg: #101014;
   --card: #1A1A20;
   --card-line: #2C2C35;
-  --accent-1: #B8823D; /* Amber untuk Breakout */
-  --accent-2: #5C8BC6; /* Biru untuk Retrace */
+  --accent-1: #B8823D;
+  --accent-2: #5C8BC6;
   --text: #E0E0E5;
   --text-dim: #8B8B99;
   --green: #4E9F3D;
@@ -81,6 +80,11 @@ LOOKBACK_PHASE = 120           # 120 hari untuk menghitung fase makro
 TROUGH_DATE = pd.Timestamp("2026-06-08") # Bottom IHSG
 
 # =====================================================================
+# DATA TICKER BEI (750+ SAHAM)
+# =====================================================================
+IDX_TICKERS_ALL = """AALI, ABBA, ABDA, ABMM, ACES, ACST, ADCP, ADES, ADHI, ADMF, ADRO, AGII, AGRO, AIMS, AISA, AKPI, AKRA, AKSI, ALDO, ALKA, ALMI, ALTO, AMAG, AMAN, AMAR, AMFG, AMIN, AMMN, AMRT, ANDI, ANJT, ANTM, APEX, APIC, APII, APLN, ARCI, ARGO, ARII, ARKA, ARKO, ARNA, ARTA, ARTI, ASBI, ASGR, ASHA, ASII, ASJT, ASLC, ASMI, ASRI, ASSA, AUTO, AYLS, BABP, BACA, BAEK, BAPA, BAPI, BATA, BAJA, BALI, BANK, BBYB, BBCA, BBHI, BBKP, BBLD, BBMD, BBNI, BBRI, BBRM, BBTN, BCAP, BCIC, BCPJ, BDMN, BEKS, BELL, BESS, BEST, BFIN, BGTG, BHIT, BIKA, BINA, BINN, BIPI, BIPP, BIRD, BISI, BKDP, BKSL, BKSW, BLTA, BLTZ, BMAS, BMSR, BMTR, BNBA, BNBR, BNGA, BNII, BNLI, BOBA, BOGA, BOLA, BPFI, BPRS, BPTN, BRAM, BRIS, BRMS, BRNA, BRPT, BSDE, BSIM, BSLC, BSML, BSWD, BTEK, BTEL, BTPS, BUKA, BULL, BUMI, BVIC, BWPT, BYAN, CAKK, CAMP, CANI, CARS, CASA, CASH, CASS, CBPE, CBRE, CCSI, CEKA, CENT, CFIN, CGAS, CHIP, CINT, CITA, CITY, CLAY, CLEO, CLPI, CMNP, CMPP, CMRY, CNKO, CNMT, CNTX, COAL, COCO, CPIN, CPRI, CPRO, CRAB, CSAP, CSIS, CSMI, CTBN, CTRA, DADA, DART, DAYA, DCII, DEAL, DEFI, DEWA, DGIK, DILD, DIVA, DKFT, DLTA, DMAS, DMMX, DMND, DNA, DNET, DOID, DPUM, DSFI, DSNG, DSSA, DUCK, DUTI, DVLA, DWGL, DYAN, EAST, ECII, EDSA, EFIN, EKAD, ELSA, ELTY, EMDE, EMTK, ENRG, ENVY, EPMT, ERAA, ERAL, ERAY, ERTX, ESIP, ESSA, ESTA, ESTI, ETWA, EXCL, FAAE, FAIL, FAPA, FAST, FASW, FENI, FIIT, FILA, FINA, FIRE, FIT, FITT, FLMC, FMII, FOOD, FORU, FOS, FPNI, FREN, GAMA, GAPP, GATA, GDST, GDYR, GEMA, GEMS, GGRM, GHCO, GIAA, GJTL, GLOB, GLVA, GMFI, GMTD, GOLD, GOLL, GOOD, GOTO, GPRA, GSMF, GTBO, GWSA, GZCO, HADE, HAIS, HALO, HAMP, HANS, HDFA, HDIT, HEAL, HELI, HERO, HEXA, HITS, HKMU, HMSP, HOKI, HOME, HOMI, HRME, HRTA, HRUM, IATA, IBC, IBST, ICBP, ICON, IDEA, IDPR, IDSR, IFII, IGAR, IIKP, IKAI, IKAN, IKBI, IMAS, IMJS, IMPC, INAF, INAI, INCF, INCI, INCO, INDF, INDO, INDR, INDX, INDY, INFA, INFO, INKP, INOV, INPC, INPP, INPS, INRU, INTA, INTD, INTP, IPCC, IPCM, IPOL, IPPE, IPMG, IRRA, ISAT, ISPA, ITIC, ITMA, ITMG, JAST, JAWA, JAYA, JCON, JGLE, JIHD, JKON, JKSW, JMAS, JPFA, JPTU, JRSK, JSKY, JSMR, JSPT, JTPE, KAEF, KARW, KAST, KBLI, KBLM, KBLV, KBRI, KDSI, KEEN, KEJU, KIAS, KICI, KIJA, KIN, KINO, KION, KIOS, KJA, KKGI, KLBF, KMDS, KOBX, KOIN, KOKA, KONI, KOPI, KOTA, KPAL, KPIG, KRAH, KRAS, KREN, KUAS, LAA, LABA, LAND, LAPD, LCKM, LCPI, LEAD, LENG, LHKI, LION, LMAS, LMPI, LMSH, LPCK, LPF, LPIN, LPKR, LPLI, LPPF, LPPS, LRNA, LSIP, LTLS, LUCK, LUSK, MABA, MACA, MAGE, MAGP, MAIN, MAJA, MAKO, MAMI, MAPA, MAPB, MAPI, MARI, MARK, MASA, MAST, MAYA, MBAP, MBC, MBSS, MBTO, MCAS, MCOR, MDIA, MDKA, MDLN, MDRN, MEDC, MEGA, MERK, META, MFAC, MFAM, MFIN, MFMI, MGNA, MGRO, MICE, MIDI, MIKA, MINA, MIRA, MITI, MKNT, MKPI, MLBI, MLIA, MLPL, MLPT, MMDC, MMND, MNCN, MOLI, MOMS, MOPA, MPAP, MPAS, MPIL, MPMR, MPPA, MPPO, MREI, MSIN, MSKY, MTDL, MTFN, MTLA, MTPS, MTRA, MTSM, MTYA, MTYI, MUGI, MUTU, MYOH, MYOR, MYRX, MYTX, NAGA, NALA, NANO, NASA, NASI, NAYZ, NCKL, NELY, NETA, NFCX, NICK, NICL, NIRO, NISP, NOBU, NRCE, NUSA, NUWA, NYAN, NZIA, OASA, OBMD, OCBC, OILS, OKAS, OMIR, OMMO, OMO, OPMS, OPTI, PADI, PAMA, PAMI, PAMP, PANR, PANS, PAOS, PBB, PBRX, PBSA, PCAR, PDES, PEGE, PEHA, PELN, PERC, PGAS, PGEO, PGLI, PGRM, PICR, PIIT, PINO, PJAA, PKPK, PLAS, PLIN, PLNC, PLSS, PMJS, PMPP, PNBN, PNBS, PNLF, PNSE, PNTX, POLA, POLI, POLL, POLU, POLY, POOL, PORT, POSA, POWR, PPGL, PPRE, PPRO, PRAS, PRIM, PRIT, PROS, PSAB, PSAK, PSGO, PSKT, PTBA, PTIS, PTMP, PTPP, PTRO, PTSN, PTSP, PUDP, PUKA, PULL, PURE, PUTI, PWON, PYFA, PZZA, RAJA, RALS, RANC, RBMS, RCCC, RDTX, REAL, REFI, RELI, RMBA, RODA, ROMA, RONY, ROSI, ROST, RSGK, SAGE, SAME, SAMF, SAPX, SCCO, SCMA, SCPI, SCTV, SDMU, SDPC, SDRA, SECT, SEJA, SEMA, SHID, SIDO, SILO, SIMA, SIMP, SINI, SION, SIPD, SIPL, SKBM, SKLT, SKRN, SKYB, SMAR, SMBR, SMCB, SMDR, SMGR, SMIL, SMKL, SMMA, SMRA, SMTK, SNLK, SOBI, SOGM, SONA, SOSS, SOTG, SOTO, SPMA, SQMI, SRA, SRAJ, SRBM, SREI, SRIL, SRTG, SSIA, SSMS, SSTM, STAR, STTP, SUCB, SUGI, SULA, SULI, SUMA, SUPR, SURA, SWAT, SWMT, SYAR, TAFG, TAMA, TAMU, TARA, TAXI, TBIG, TBLA, TCID, TCPI, TEBE, TECH, TELE, TFCO, TGKA, TIFA, TIGM, TINS, TIRA, TIRT, TKIM, TLDN, TLKM, TMAS, TMPO, TOBA, TOPO, TOTO, TOWR, TPIA, TRAM, TRIL, TRIN, TRIO, TRIS, TRJA, TRST, TRUE, TRUK, TSPC, TUGU, TURI, TYRE, UCID, UANG, UKMN, ULTJ, UNIC, UNIQ, UNIT, UNTR, UNVR, UPPF, URBN, USUP, VIC, VICO, VINS, VIRT, VIVA, VKKI, VOKS, VRNA, VTNY, WAPO, WARR, WEGE, WICO, WIDA, WIFI, WIIA, WIKA, WIM, WIPO, WIRG, WMPP, WMUU, WOMF, WOOD, WOWS, WSBP, WSKT, WTON, WZMA, YELO, YPAS, YULE, ZATA, ZBRA, ZINC, ZYRX"""
+
+# =====================================================================
 # ENGINE PERHITUNGAN
 # =====================================================================
 @st.cache_data(ttl=900, show_spinner=False)
@@ -110,7 +114,6 @@ def hitung_fase_wyckoff(low_series):
     if len(low_after_gz) < 10: return 0
         
     swing_lows = []
-    # Gunakan jendela 10 hari untuk mengabaikan riak kecil (5 hari sblm, 5 hari ssdh)
     for i in range(5, len(low_after_gz) - 5):
         window = low_after_gz.iloc[i-5:i+6]
         if low_after_gz.iloc[i] == window.min():
@@ -119,7 +122,7 @@ def hitung_fase_wyckoff(low_series):
     fase = 0
     last_sl = ground_zero_val
     for sl in swing_lows:
-        if sl > last_sl * 1.02: # Wajib lebih tinggi minimal 2% untuk dihitung Higher Low valid
+        if sl > last_sl * 1.02:
             fase += 1
             last_sl = sl
         elif sl < last_sl:
@@ -139,38 +142,32 @@ def analyze_stock(df_stock, ticker):
     close, high, low, volume = close[common_idx], high[common_idx], low[common_idx], volume[common_idx]
     if len(close) < 35: return None
 
-    # -- TAHAP 0: LIKUIDITAS & DETAK JANTUNG --
+    # TAHAP 0: LIKUIDITAS & DETAK JANTUNG
     val_ma20 = (close * volume).rolling(20).mean().iloc[-1]
-    
     hh20_series = high.shift(1).rolling(LL_PERIOD).max()
     ll20_series = low.shift(1).rolling(LL_PERIOD).min()
     hh20 = hh20_series.iloc[-1]
     ll20 = ll20_series.iloc[-1]
     close_now = close.iloc[-1]
-    
     heartbeat_range = (hh20 - ll20) / ll20 if ll20 > 0 else 0
 
-    # -- TAHAP 1: SETUP ABSORPTION --
+    # TAHAP 1: SETUP ABSORPTION
     vma10 = volume.rolling(10).mean().iloc[-1]
     vma30 = volume.rolling(30).mean().iloc[-1]
     vol_ratio = vma10 / vma30 if vma30 > 0 else 999
-    
     struktur_aman = close_now >= ll20
 
-    # -- TAHAP 2: KERANJANG AKSI --
+    # TAHAP 2: KERANJANG AKSI
     stoch_k_series = calculate_stochastic(high, low, close)
     stoch_k = stoch_k_series.iloc[-1]
     
-    # Deteksi memori Breakout (Pernah nembus HH20 dalam 20 hari terakhir)
     past_20_closes = close.iloc[-20:]
     past_20_hh20s = hh20_series.iloc[-20:]
     has_breakout_history = any(past_20_closes >= past_20_hh20s)
     
-    # Pelatuk Eksekusi
     is_breakout = close_now >= hh20
     is_retrace = (close_now < hh20) and (stoch_k <= STOCH_OVERSOLD) and has_breakout_history
 
-    # Metrik Tambahan
     fase_aktif = hitung_fase_wyckoff(low)
     bottom_120 = low.tail(LOOKBACK_PHASE).min()
     pct_from_bottom_120 = ((close_now - bottom_120) / bottom_120) * 100 if bottom_120 > 0 else 0
@@ -205,18 +202,18 @@ st.markdown("Sistem penyaringan *Swing Cycle* berbasis likuiditas, *Wyckoff Abso
 
 st.sidebar.markdown("### ⚙️ Universe Input")
 universe_input = st.sidebar.text_area(
-    "Paste 800+ Ticker BEI di sini:",
-    value="BBCA, BBRI, BMRI, BBNI, BRIS, AMMN, TPIA, BREN, BYAN, ASII, \nTLKM, UNTR, ICBP, MYOR, INCO, ANTM, PTBA, ADRO, TINS, HRTA, \nEMAS, SSMS, TOWR, AADI, CYBR, EPAC, MBSS, MUTU, GPRA, TBIG, REAL",
-    height=200
+    "Daftar Ticker BEI (Default: 750+ Saham):",
+    value=IDX_TICKERS_ALL,
+    height=250
 )
 tickers_raw = [t.strip().upper() for t in universe_input.replace('\n', ',').split(',') if t.strip()]
 TICKERS = list(set(tickers_raw))
 
-if st.button("🚀 Pindai Pasar Sekarang"):
+if st.button("🚀 Pindai Seluruh Pasar"):
     if not TICKERS:
         st.stop()
         
-    with st.spinner(f"Mengunduh dan menganalisis {len(TICKERS)} saham..."):
+    with st.spinner(f"Menarik & menganalisis {len(TICKERS)} saham dari Yahoo Finance (Mohon tunggu 1-2 menit)..."):
         df_market = fetch_market_data(TICKERS)
     if df_market is None: st.stop()
 
@@ -229,25 +226,20 @@ if st.button("🚀 Pindai Pasar Sekarang"):
         m = analyze_stock(df_stock, t)
         if not m: continue
             
-        # TAHAP 0: Filter Sampah
         if m["val_ma20"] < MIN_LIQUIDITY: continue
         if m["heartbeat"] < MIN_HEARTBEAT: continue
-        
-        # TAHAP 1: Syarat Absorption
         if not m["struktur_aman"]: continue
         if m["vol_ratio"] >= VOL_RATIO_MAX: continue
         
-        # TAHAP 2: Sortir Keranjang
         if m["is_breakout"]:
             k_breakout.append(m)
         elif m["is_retrace"]:
             k_retrace.append(m)
 
     if not k_breakout and not k_retrace:
-        st.warning("Tidak ada saham yang lolos filter hari ini.")
+        st.warning("Tidak ada saham yang lolos filter sistem hari ini.")
         st.stop()
 
-    # Hitung Sektor & Gap
     valid_tickers = [c["ticker"] for c in k_breakout + k_retrace]
     with st.spinner("Memetakan Sektor..."):
         sector_map = fetch_sectors(valid_tickers)
@@ -262,19 +254,16 @@ if st.button("🚀 Pindai Pasar Sekarang"):
             c["sektor"] = skt
             c["gap_sektoral"] = c["ret_from_trough"] - sector_avg_map[skt]
 
-    # URUTKAN & TAMPILKAN
     k_breakout.sort(key=lambda x: x["vol_ratio"])
     k_retrace.sort(key=lambda x: x["stoch_k"])
 
     st.divider()
 
-    # --- KERANJANG 1 ---
     st.subheader(f"🛒 Keranjang 1: Fase Breakout ({len(k_breakout)} Saham)")
     st.caption("Aksi: Entry awal 30%. Syarat: Terbukti ada jejak No Supply dan hari ini menembus Highest High 20 (HH20).")
     for c in k_breakout:
         fig = go.Figure(go.Scatter(y=c["price_history"], mode='lines', line=dict(color='#B8823D', width=2)))
         fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(visible=False), yaxis=dict(visible=False))
-        gap_col = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
         
         st.markdown(f"""
         <div class="card-breakout">
@@ -296,13 +285,11 @@ if st.button("🚀 Pindai Pasar Sekarang"):
         """, unsafe_allow_html=True)
         st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
 
-    # --- KERANJANG 2 ---
     st.subheader(f"🛒 Keranjang 2: Retrace & Compounding ({len(k_retrace)} Saham)")
     st.caption("Aksi: Entry 70% atau Gulung Profit 100%. Syarat: Pernah Breakout, harga tertahan di atas LL20, dan Stochastic Oversold.")
     for c in k_retrace:
         fig = go.Figure(go.Scatter(y=c["price_history"], mode='lines', line=dict(color='#5C8BC6', width=2)))
         fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(visible=False), yaxis=dict(visible=False))
-        gap_col = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
         
         st.markdown(f"""
         <div class="card-retrace">
@@ -324,5 +311,4 @@ if st.button("🚀 Pindai Pasar Sekarang"):
         """, unsafe_allow_html=True)
         st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
 
-    # --- ATURAN EXIT ---
     st.info("**SOP KEDISIPLINAN (Manual):** Jual Profit 100% jika Stochastic K > 80 selama 2 hari beruntun. Cut Loss seketika jika harga turun 1 tick di bawah Batas Bawah LL20.")
