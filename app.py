@@ -4,10 +4,10 @@ COMPOUNDING SCREENER
 Peleburan Wyckoff (No Supply), Turtle (Disiplin), dan Regime (Laggard Gap).
 Fokus: Mencari saham Fase 1-2 (bertahan di atas Lowest Low 20) dengan indikasi 
 No Supply (Volume MA10/MA30 < 1.0) dan momentum segar (Stochastic K < 80).
-Dilengkapi deteksi Fase Kenaikan (maksimal 120 hari ke belakang).
+Dilengkapi deteksi Fase Kenaikan dan jarak dari dasar 120 hari ke belakang.
 
 Jalankan: streamlit run compounding_screener.py
-Kebutuhan: streamlit yfinance pandas numpy plotly scipy
+Kebutuhan: streamlit yfinance pandas numpy plotly
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 st.set_page_config(page_title="Compounding Screener", layout="wide")
 WIB = timezone(timedelta(hours=7))
@@ -31,7 +31,7 @@ st.markdown("""
   --bg: #101014;
   --card: #1A1A20;
   --card-line: #2C2C35;
-  --accent: #B8823D; /* Warna emas/amber ala Regime */
+  --accent: #B8823D;
   --text: #E0E0E5;
   --text-dim: #8B8B99;
   --green: #4E9F3D;
@@ -95,31 +95,23 @@ def calculate_stochastic(high, low, close, k_window=14):
     return stoch_k
 
 def hitung_fase_wyckoff(low_series):
-    """Mendeteksi Fase Kenaikan dari 120 hari terakhir"""
-    if len(low_series) < 60: # Minimal data cukup
+    if len(low_series) < 60:
         return 0
         
     low_120 = low_series.tail(LOOKBACK_PHASE)
-    
-    # 1. Cari Titik Nol (Ground Zero)
     ground_zero_idx = low_120.argmin()
     ground_zero_val = low_120.iloc[ground_zero_idx]
     
-    # Ambil data setelah Titik Nol
     low_after_gz = low_120.iloc[ground_zero_idx:]
-    
     if len(low_after_gz) < 10:
-        return 0 # Belum cukup waktu untuk membentuk swing low baru
+        return 0
         
-    # 2. Cari Swing Lows (Lembah)
     swing_lows = []
-    # Deteksi lembah: lebih rendah dari 4 hari sebelum & 4 hari sesudah
     for i in range(4, len(low_after_gz) - 4):
         window = low_after_gz.iloc[i-4:i+5]
         if low_after_gz.iloc[i] == window.min():
             swing_lows.append(low_after_gz.iloc[i])
             
-    # 3. Hitung runtutan Higher Lows
     fase = 0
     last_sl = ground_zero_val
     for sl in swing_lows:
@@ -127,7 +119,7 @@ def hitung_fase_wyckoff(low_series):
             fase += 1
             last_sl = sl
         elif sl < last_sl:
-            fase = 0 # Tren patah, reset hitungan
+            fase = 0
             last_sl = sl
             
     return fase
@@ -144,9 +136,8 @@ def analyze_stock(df_stock, ticker):
     common_idx = close.index.intersection(volume.index)
     close, high, low, volume = close[common_idx], high[common_idx], low[common_idx], volume[common_idx]
     
-    if len(close) < LOOKBACK_PHASE:
-        # Jika data kurang dari 120 hari, sistem tetap jalan tapi log fase mungkin kurang akurat
-        pass
+    if len(close) < 35:
+        return None
 
     # 1. Likuiditas (Value 20 hari rata-rata)
     value_daily = close * volume
@@ -166,8 +157,12 @@ def analyze_stock(df_stock, ticker):
     stoch_k_series = calculate_stochastic(high, low, close)
     stoch_k = stoch_k_series.iloc[-1]
     
-    # 5. Penghitungan Fase (Higher Lows)
+    # 5. Penghitungan Fase
     fase_aktif = hitung_fase_wyckoff(low)
+    
+    # 6. Kenaikan dari bottom 120 Hari
+    bottom_120 = low.tail(LOOKBACK_PHASE).min()
+    pct_from_bottom_120 = ((close_now - bottom_120) / bottom_120) * 100
     
     # Gap Sektoral (Return sejak bottom IHSG 8 Juni 2026)
     close_after_trough = close[close.index >= TROUGH_DATE]
@@ -185,8 +180,9 @@ def analyze_stock(df_stock, ticker):
         "vol_ratio": float(vol_ratio),
         "stoch_k": float(stoch_k),
         "fase": fase_aktif,
+        "pct_from_bottom_120": float(pct_from_bottom_120),
         "ret_from_trough": float(ret_from_trough),
-        "price_history": close.tail(45).tolist() # Untuk chart mini
+        "price_history": close.tail(45).tolist()
     }
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -243,7 +239,6 @@ if st.button("🚀 Jalankan Screener"):
             metrics = analyze_stock(df_stock, t)
             if not metrics: continue
                 
-            # Gerbang Keras
             if metrics["val_ma20"] < MIN_LIQUIDITY: continue
             if not metrics["retrace_sehat"]: continue
             if metrics["stoch_k"] >= STOCH_K_MAX: continue
@@ -255,7 +250,6 @@ if st.button("🚀 Jalankan Screener"):
         st.info("Tidak ada saham yang lolos semua gerbang (Likuiditas, LL20, Stoch < 80, No Supply).")
         st.stop()
 
-    # Hitung Sektor & Gap
     with st.spinner("Menarik label sektor & menghitung Gap..."):
         valid_tickers = [c["ticker"] for c in candidates_raw]
         sector_map = fetch_sectors_for_candidates(valid_tickers)
@@ -273,7 +267,6 @@ if st.button("🚀 Jalankan Screener"):
             c["sector_avg"] = sector_avg_map[skt]
             c["gap_sektoral"] = c["ret_from_trough"] - c["sector_avg"]
 
-    # Urutkan berdasarkan Fase paling segar (0 atau 1) lalu Suplai terkering
     candidates_raw.sort(key=lambda x: (x["fase"], x["vol_ratio"]))
 
     st.subheader(f"🎯 {len(candidates_raw)} Kandidat Compounding")
@@ -283,7 +276,6 @@ if st.button("🚀 Jalankan Screener"):
         gap_color = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
         stoch_color = "var(--green)" if c["stoch_k"] < 30 else "var(--text)"
         
-        # Peringatan Fase > 2
         fase_label = "Awal (Fresh)" if c["fase"] <= 1 else ("Lanjutan" if c["fase"] == 2 else "RAWAN (Bahaya)")
         badge_fase_class = "badge-fase-aman" if c["fase"] <= 2 else "badge-fase-bahaya"
         
@@ -304,8 +296,9 @@ if st.button("🚀 Jalankan Screener"):
             <div class="metric-row">
                 <div class="metric-item">Vol Ratio: <span class="metric-val" style="color:var(--green)">{c['vol_ratio']:.2f}x</span></div>
                 <div class="metric-item">Stochastic K: <span class="metric-val" style="color:{stoch_color}">{c['stoch_k']:.1f}</span></div>
-                <div class="metric-item">Value 20H: <span class="metric-val">Rp {c['val_ma20']/1e9:.1f}M</span></div>
+                <div class="metric-item">Value 20H: <span class="metric-val">Rp {c['val_ma20']/1e9:.1f} Miliar</span></div>
                 <div class="metric-item">Batas SL (LL20): <span class="metric-val" style="color:var(--red)">{c['ll20']:,.0f}</span></div>
+                <div class="metric-item">Dari Dasar 120H: <span class="metric-val" style="color:var(--green)">+{c['pct_from_bottom_120']:.1f}%</span></div>
                 <div class="metric-item">Gap Sektor: <span class="metric-val" style="color:{gap_color}">{c['gap_sektoral']:+.1f}%</span></div>
             </div>
         </div>
