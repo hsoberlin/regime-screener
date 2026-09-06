@@ -9,7 +9,6 @@ Sistem penyaringan saham berbasis siklus:
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from datetime import timedelta, timezone
@@ -257,6 +256,7 @@ if st.button("Pindai Seluruh Pasar"):
                 <span class="badge badge-fase">Fase Kenaikan: {c['fase']}</span>
             </div>
             <div class="metric-grid">
+                <div class="metric-item">Stochastic (10,5) <span class="metric-val" style="color:var(--accent-1)">{c['stoch_k']:.1f}</span></div>
                 <div class="metric-item">Harga Tembus <span class="metric-val" style="color:var(--green)">{c['close']:,.0f}</span></div>
                 <div class="metric-item">Resisten HH20 <span class="metric-val">{c['hh20']:,.0f}</span></div>
                 <div class="metric-item">No Supply Ratio <span class="metric-val">{c['vol_ratio']:.2f}x</span></div>
