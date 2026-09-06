@@ -1,1099 +1,314 @@
 """
-REGIME SCREENER
-===============
-Deteksi fase siklus IHSG (BEAR / BOTTOM-REBOUND / NORMALIZING) + pemburu saham
-laggard sektor, dengan bobot ekuitas Rp20 juta all-in ke satu kandidat terbaik.
+COMPOUNDING SCREENER
+====================
+Peleburan Wyckoff (No Supply), Turtle (Disiplin), dan Regime (Laggard Gap).
+Fokus: Mencari saham Fase 1-2 (bertahan di atas Lowest Low 20) dengan indikasi 
+No Supply (Volume MA10/MA30 < 1.0) dan momentum segar (Stochastic K < 80).
+Dilengkapi deteksi Fase Kenaikan (maksimal 120 hari ke belakang).
 
-4 tahap:
-    1. Status IHSG   -- fase siklus + backtest probabilitas historis (7 episode sejak 2000)
-    2. Status Sektor -- return tiap sektor sejak titik bottom IHSG terakhir
-    3. Kandidat Emiten -- gerbang keras -> skor -> tier, dalam sektor yang sudah bergerak
-    4. Bobot Ekuitas -- all-in / tie-breaker / cash ditahan / cash menganggur
-
-Tema visual: identitas terpisah dari Turtle Board (Opsi B, disetujui 1 Sep 2026).
-Dasar hangat/gelap + aksen amber redup, bukan neon -- radar chart jadi elemen
-utama tiap kartu kandidat. Space Grotesk untuk judul/ticker, IBM Plex Mono
-untuk angka -- sengaja beda font dari Orbitron/JetBrains Mono-nya Turtle Board
-supaya dua app ini terasa sebagai dua alat yang beda karakter meski satu keluarga.
-
-Jalankan:  streamlit run app.py
-Kebutuhan: streamlit yfinance pandas numpy plotly requests
+Jalankan: streamlit run compounding_screener.py
+Kebutuhan: streamlit yfinance pandas numpy plotly scipy
 """
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
 
-st.set_page_config(page_title="Regime Screener", layout="centered")
-
+st.set_page_config(page_title="Compounding Screener", layout="wide")
 WIB = timezone(timedelta(hours=7))
 
 # =====================================================================
-# TEMA VISUAL -- Opsi B: identitas terpisah dari Turtle Board
+# TEMA VISUAL (Dark Clean)
 # =====================================================================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg: #15110C;
-  --card: #1F1811;
-  --card-line: #2A2118;
-  --amber: #B8823D;
-  --karat: #8B4539;
-  --text: #E8DFD3;
-  --text-dim: #9C8F7A;
+  --bg: #101014;
+  --card: #1A1A20;
+  --card-line: #2C2C35;
+  --accent: #B8823D; /* Warna emas/amber ala Regime */
+  --text: #E0E0E5;
+  --text-dim: #8B8B99;
+  --green: #4E9F3D;
+  --red: #D9534F;
+  --warn: #E2B93B;
 }
 
 .stApp { background-color: var(--bg); }
-.stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div { color: var(--text); }
+.stApp, .stApp p, .stApp span, .stApp div { color: var(--text); }
+h1, h2, h3 { font-family: 'Space Grotesk', sans-serif !important; color: var(--text) !important; }
+[data-testid="stMetricValue"], code, .stMarkdown code { font-family: 'IBM Plex Mono', monospace !important; }
 
-h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-  font-family: 'Space Grotesk', sans-serif !important;
-  font-weight: 700 !important;
-  letter-spacing: 0.3px;
-  color: var(--text) !important;
+.compounding-card {
+  background: var(--card); border: 1px solid var(--card-line);
+  padding: 16px; border-radius: 8px; margin-bottom: 12px;
+  border-left: 4px solid var(--accent);
 }
-
-[data-testid="stMetricValue"], .stCaptionContainer, .stCaptionContainer p,
-code, .stMarkdown code {
-  font-family: 'IBM Plex Mono', monospace !important;
-}
-.stCaptionContainer, .stCaptionContainer p { color: var(--text-dim) !important; }
-
-/* --- panel status berjenjang: angka besar + label kecil, bukan baris titik-titik --- */
-.rs-panel {
-  padding: 16px 20px;
-  border-radius: 6px;
-  background: var(--card);
-  border-left: 3px solid var(--amber);
-  margin-bottom: 10px;
-}
-.rs-panel.karat { border-left-color: var(--karat); }
-.rs-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 12px; font-weight: 700; letter-spacing: 2px;
-  color: var(--amber); margin-bottom: 6px; text-transform: uppercase;
-}
-.rs-panel.karat .rs-label { color: var(--karat); }
-.rs-angka {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 32px; font-weight: 600; color: var(--text); line-height: 1.1;
-}
-.rs-sub {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 13px; color: var(--text-dim); margin-top: 5px;
-}
-
-/* --- ranking sektor: bar horizontal, bukan daftar titik-titik --- */
-.rs-sektor-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
-.rs-sektor-nama {
-  font-family: 'Space Grotesk', sans-serif; font-size: 13px;
-  width: 168px; flex-shrink: 0; color: var(--text);
-}
-.rs-sektor-bar-bg {
-  flex: 1; background: var(--card-line); border-radius: 3px;
-  height: 14px; overflow: hidden;
-}
-.rs-sektor-bar-isi { background: var(--amber); height: 100%; opacity: 0.85; }
-.rs-sektor-nilai {
-  font-family: 'IBM Plex Mono', monospace; font-size: 12px;
-  width: 58px; text-align: right; color: var(--text-dim); flex-shrink: 0;
-}
-
-/* --- badge status kandidat --- */
-.rs-badge {
+.compounding-title { font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 700; }
+.badge {
   font-family: 'IBM Plex Mono', monospace; font-size: 11px;
-  padding: 3px 11px; border-radius: 10px; letter-spacing: 0.5px;
-  display: inline-block;
+  padding: 4px 10px; border-radius: 12px; margin-left: 8px;
 }
-.rs-badge-allin {
-  background: rgba(184,130,61,0.18); color: var(--amber);
-  border: 1px solid rgba(184,130,61,0.45);
-}
-.rs-badge-tahan {
-  background: rgba(232,223,211,0.06); color: var(--text-dim);
-  border: 1px solid rgba(232,223,211,0.15);
-}
-.rs-badge-kandidat {
-  background: transparent; color: var(--text-dim);
-  border: 1px solid rgba(232,223,211,0.1);
-}
+.badge-sektor { background: rgba(184, 130, 61, 0.15); color: var(--accent); border: 1px solid rgba(184, 130, 61, 0.3); }
+.badge-fase-aman { background: rgba(78, 159, 61, 0.15); color: var(--green); border: 1px solid rgba(78, 159, 61, 0.3); }
+.badge-fase-bahaya { background: rgba(217, 83, 79, 0.15); color: var(--red); border: 1px solid rgba(217, 83, 79, 0.3); }
 
-/* --- kartu kandidat: container native streamlit, diwarnai ulang --- */
-[data-testid="stVerticalBlockBorderWrapper"] {
-  background: var(--card) !important;
-  border-color: var(--card-line) !important;
-  border-radius: 8px !important;
-}
-
-section[data-testid="stSidebar"] { background: #100D09; border-right: 1px solid var(--card-line); }
-section[data-testid="stSidebar"] * { color: var(--text) !important; }
-
-[data-testid="stMetricLabel"] { color: var(--text-dim) !important; }
-[data-testid="stMetricValue"] { color: var(--text) !important; font-family: 'IBM Plex Mono', monospace !important; }
-[data-testid="stMetricDelta"] { font-family: 'IBM Plex Mono', monospace !important; }
-
-.stButton button {
-  background: var(--card) !important; color: var(--amber) !important;
-  border: 1px solid rgba(184,130,61,0.35) !important;
-  font-family: 'Space Grotesk', sans-serif !important; font-weight: 600 !important;
-}
-.stButton button:hover { border-color: var(--amber) !important; }
-
-[data-testid="stExpander"] { border-color: var(--card-line) !important; background: var(--card) !important; }
+.metric-row { display: flex; gap: 15px; margin-top: 10px; flex-wrap: wrap; }
+.metric-item { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); }
+.metric-val { color: var(--text); font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
 # =====================================================================
-# UNIVERSE -- basket representatif per sektor (bukan 840 emiten penuh)
+# PARAMETER SISTEM
 # =====================================================================
-SECTOR_BASKETS = {
-    "Barang Baku": ["TPIA", "INTP", "SMGR", "INKP", "ANTM", "INCO", "MDKA",
-                    "TINS", "MBMA", "BRPT", "ESSA"],
-    "Energi": ["MEDC", "PGAS", "ADRO", "PTBA", "ITMG", "AKRA",
-               "HRUM", "INDY", "ELSA", "ADMR"],
-    "Perindustrian": ["ASII", "UNTR", "HEXA", "AUTO",
-                       "PTRO", "ASGR", "DRMA"],
-    "Keuangan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS",
-                 "BJBR", "BJTM", "BNGA", "NISP"],
-    "Konsumer Siklikal": ["MAPI", "ACES", "LPPF", "ERAA",
-                          "MYOR", "MIDI", "MAPA"],
-    "Properti": ["BSDE", "CTRA", "PWON", "SMRA",
-                 "ASRI", "DILD", "APLN"],
-    "Kesehatan": ["KLBF", "HEAL", "MIKA", "SIDO"],  # lapis 2 kesehatan terbatas, belum ditambah
-}
-SEKTOR_FINANSIAL = {"Keuangan"}
-PAPAN_PENGEMBANGAN = {"NCKL", "DOID"}  # placeholder -- perlu update manual berkala
-ALL_TICKERS = sorted({t for lst in SECTOR_BASKETS.values() for t in lst})
+MIN_LIQUIDITY = 1_000_000_000  # Rp 1 Miliar
+VOL_RATIO_MAX = 1.0            # VMA10 / VMA30
+STOCH_K_MAX = 80               # Batas overbought
+LL_PERIOD = 20                 # Lowest Low 20 hari (Batas SL)
+LOOKBACK_PHASE = 120           # 120 hari ke belakang untuk Titik Nol Fase
+TROUGH_DATE = pd.Timestamp("2026-06-08") # Untuk Gap Sektoral
 
 # =====================================================================
-# PARAMETER (kalibrasi di sini)
+# FUNGSI PERHITUNGAN
 # =====================================================================
-BEAR_THRESHOLD = -0.20
-REBOUND_TRIGGER = 0.20
-NORMALIZING_TRIGGER = 0.20
-GAP_SIGNIFIKAN_THRESHOLD = -10.0
-BERAT_NAIK_DER_MULTIPLIER = 1.5
-BERAT_NAIK_BETA_THRESHOLD = 0.3
-BERAT_NAIK_TOP_N_MCAP = 2
-BERAT_NAIK_PENALTY = 0.5
-MODAL_EQUITAS = 20_000_000
-
-# --- Gerbang eksekusi Tahap 4 -- revisi 3 Sep 2026 ---
-# Dasar: O'Neil (How to Make Money in Stocks) -- breakout genuine dikonfirmasi basis
-# rapi + closing kuat + volume, bukan volume sendirian. Amihud (Illiquidity and Stock
-# Returns, 2002) + praktik quant standar -- lantai likuiditas absolut DAN relatif ke
-# grup pembanding sekaligus, bukan salah satu saja.
-BASIS_LOOKBACK = 12             # hari, jendela basis SEBELUM hari eksekusi (exclude hari ini)
-BASIS_KETAT_MAKS = 0.08         # (high tertinggi - low terendah) / low terendah di jendela itu
-CLOSE_POSISI_MIN = 0.75         # closing harus di 75% teratas dari range high-low hari itu
-PARTICIPATION_VOL_RATIO = 1.75  # turun dari 4.0 -- sekarang konfirmasi TERAKHIR, bukan gerbang
-                                 # tunggal, karena basis+closing sudah membuktikan struktur duluan
-LIKUIDITAS_LANTAI_ABSOLUT = 2_000_000_000   # Rp2 miliar, jaring pengaman minimum mutlak
-LIKUIDITAS_MULTIPLIER_SEKTOR = 0.5          # atau >=50% median likuiditas 20h sektornya sendiri
-LIKUIDITAS_MIN_N_SEKTOR = 5                 # median sektor baru dipercaya kalau >=5 saham valid
-
-# --- Manajemen risiko posisi (30 Agu 2026, respons review Claude Project lain) ---
-LARI_HARI_INI_MAKS = 0.05      # skip kandidat kalau harga sudah lari >5% dari open hari itu
-                                 # (mirip konsep LARI SEJAK Turtle Board, versi data harian)
-SL_KERAS_PCT = -0.10           # SL keras dari harga entry, aktif SEJAK HARI PERTAMA -- ini
-                                 # yang menutup "zona tanpa perlindungan" sebelum trailing-lock
-                                 # aktif (trailing baru mulai di gain >=10%, jadi ada jendela
-                                 # rugi -0% s/d -SL_KERAS_PCT yang sebelumnya tidak terjaga sama sekali)
-TRAILING_AKTIF_GAIN = 0.10     # trailing-lock baru aktif setelah gain >= ini
-TRAILING_LOCK_PCT = 0.75       # trailing-lock mengunci 75% dari gain puncak
-
-# =====================================================================
-# REFERENSI SIKLUS 2026 -- DATA STATIS (puncak & bottom sudah jadi sejarah)
-# =====================================================================
-PUNCAK_2026 = 9134.70                         # 20 Jan 2026
-TROUGH_2026_HARGA = 5342.14                   # 8 Jun 2026
-TROUGH_2026_TANGGAL = pd.Timestamp("2026-06-08")
-
-
 @st.cache_data(ttl=900, show_spinner=False)
-def ambil_harga_ihsg_now():
-    """Fungsi ini SALINAN PERSIS ambil_makro() Turtle Board (tickers, period, semua
-    parameter sama persis) -- terbukti jalan di server yang sama. Tidak dimodifikasi
-    lagi supaya tidak ada lagi tebakan soal parameter mana yang beda.
-    Mengembalikan (harga, tanggal, error_message)."""
-    peta = {"^JKSE": "IHSG", "IDR=X": "USDIDR", "CL=F": "MINYAK",
-            "GC=F": "EMAS", "HG=F": "TEMBAGA", "^IXIC": "NASDAQ"}
+def fetch_market_data(tickers, period="6mo"):
+    tickers_jk = [f"{t}.JK" for t in tickers]
     try:
-        df = yf.download(list(peta), period="1mo", interval="1d", progress=False,
-                         auto_adjust=False, group_by="ticker", threads=True)
-        if df is None or df.empty:
-            return None, None, f"yf.download mengembalikan dataframe kosong. Shape: {None if df is None else df.shape}"
-        if isinstance(df.columns, pd.MultiIndex):
-            if "^JKSE" not in df.columns.get_level_values(0):
-                return None, None, f"Kolom tidak ada '^JKSE'. Kolom yang ada: {list(df.columns)[:10]}"
-            close = df["^JKSE"]["Close"].dropna()
-        else:
-            close = df["Close"].dropna()
-        if len(close) == 0:
-            return None, None, "Kolom Close ada tapi semua nilai NaN/kosong setelah dropna()."
-        return float(close.iloc[-1]), close.index[-1], None
+        df = yf.download(tickers_jk, period=period, interval="1d", 
+                         progress=False, group_by="ticker", threads=True)
+        return df
     except Exception as e:
-        import traceback
-        return None, None, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-
-
-# =====================================================================
-# BETA MANUAL VS IHSG (30 Agu 2026)
-# =====================================================================
-# yfinance .info['beta'] TERBUKTI TIDAK BISA DIPERCAYA untuk saham IDX --
-# cross-check manual (SMGR: yfinance 0.08 vs hitung manual 0.92, PGAS: yfinance
-# 0.09 vs manual 0.69) menunjukkan yfinance kemungkinan menghitung terhadap
-# index yang salah (bukan IHSG). Beta di sistem ini SEKARANG dihitung sendiri:
-# kovarian return harian saham vs return harian IHSG, dibagi varian IHSG,
-# pakai 1 tahun data -- bukan lagi ambil dari info dict yfinance.
-@st.cache_data(ttl=1800, show_spinner=False)
-def ambil_ihsg_untuk_beta():
-    """IHSG ~1 tahun terakhir, cuma untuk hitung beta -- request bareng ticker
-    lain (bukan sendirian), pola yang sama terbukti jalan di ambil_harga_ihsg_now."""
-    try:
-        df = yf.download(["^JKSE", "IDR=X", "^IXIC"], period="1y", interval="1d",
-                         progress=False, auto_adjust=False, group_by="ticker", threads=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            close = df["^JKSE"]["Close"].dropna()
-        else:
-            close = df["Close"].dropna()
-        return close
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-def hitung_beta(close_saham, close_ihsg):
-    """Beta = kovarian(return saham, return IHSG) / varian(return IHSG)."""
-    try:
-        ret_saham = close_saham.pct_change().dropna()
-        ret_ihsg = close_ihsg.pct_change().dropna()
-        gabung = pd.concat([ret_saham, ret_ihsg], axis=1, join="inner").dropna()
-        if len(gabung) < 60:  # kurang dari ~3 bulan data overlap, jangan dipercaya
-            return None
-        gabung.columns = ["saham", "ihsg"]
-        var_ihsg = gabung["ihsg"].var()
-        if var_ihsg == 0:
-            return None
-        return float(gabung["saham"].cov(gabung["ihsg"]) / var_ihsg)
-    except Exception:
+        st.error(f"Gagal menarik data: {e}")
         return None
 
+def calculate_stochastic(high, low, close, k_window=14):
+    lowest_low = low.rolling(window=k_window).min()
+    highest_high = high.rolling(window=k_window).max()
+    stoch_k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+    return stoch_k
 
-def status_ihsg_ringan(harga_now, tanggal):
-    drawdown_52w = (harga_now - PUNCAK_2026) / PUNCAK_2026 * 100
-    pct_dari_trough = (harga_now - TROUGH_2026_HARGA) / TROUGH_2026_HARGA * 100
-    if pct_dari_trough >= NORMALIZING_TRIGGER * 100:
-        fase = "NORMALIZING"
-    elif pct_dari_trough >= REBOUND_TRIGGER * 100:
-        fase = "BOTTOM-REBOUND"
+def hitung_fase_wyckoff(low_series):
+    """Mendeteksi Fase Kenaikan dari 120 hari terakhir"""
+    if len(low_series) < 60: # Minimal data cukup
+        return 0
+        
+    low_120 = low_series.tail(LOOKBACK_PHASE)
+    
+    # 1. Cari Titik Nol (Ground Zero)
+    ground_zero_idx = low_120.argmin()
+    ground_zero_val = low_120.iloc[ground_zero_idx]
+    
+    # Ambil data setelah Titik Nol
+    low_after_gz = low_120.iloc[ground_zero_idx:]
+    
+    if len(low_after_gz) < 10:
+        return 0 # Belum cukup waktu untuk membentuk swing low baru
+        
+    # 2. Cari Swing Lows (Lembah)
+    swing_lows = []
+    # Deteksi lembah: lebih rendah dari 4 hari sebelum & 4 hari sesudah
+    for i in range(4, len(low_after_gz) - 4):
+        window = low_after_gz.iloc[i-4:i+5]
+        if low_after_gz.iloc[i] == window.min():
+            swing_lows.append(low_after_gz.iloc[i])
+            
+    # 3. Hitung runtutan Higher Lows
+    fase = 0
+    last_sl = ground_zero_val
+    for sl in swing_lows:
+        if sl > last_sl:
+            fase += 1
+            last_sl = sl
+        elif sl < last_sl:
+            fase = 0 # Tren patah, reset hitungan
+            last_sl = sl
+            
+    return fase
+
+def analyze_stock(df_stock, ticker):
+    if df_stock is None or len(df_stock.dropna()) < 35:
+        return None
+        
+    close = df_stock['Close'].dropna()
+    high = df_stock['High'].dropna()
+    low = df_stock['Low'].dropna()
+    volume = df_stock['Volume'].dropna()
+    
+    common_idx = close.index.intersection(volume.index)
+    close, high, low, volume = close[common_idx], high[common_idx], low[common_idx], volume[common_idx]
+    
+    if len(close) < LOOKBACK_PHASE:
+        # Jika data kurang dari 120 hari, sistem tetap jalan tapi log fase mungkin kurang akurat
+        pass
+
+    # 1. Likuiditas (Value 20 hari rata-rata)
+    value_daily = close * volume
+    val_ma20 = value_daily.rolling(20).mean().iloc[-1]
+    
+    # 2. Batas Fase & Cut Loss (Lowest Low 20 hari)
+    ll20 = low.shift(1).rolling(LL_PERIOD).min().iloc[-1]
+    close_now = close.iloc[-1]
+    retrace_sehat = close_now >= ll20
+    
+    # 3. No Supply (Volume Ratio)
+    vma10 = volume.rolling(10).mean().iloc[-1]
+    vma30 = volume.rolling(30).mean().iloc[-1]
+    vol_ratio = vma10 / vma30 if vma30 > 0 else 999
+    
+    # 4. Momentum (Stochastic)
+    stoch_k_series = calculate_stochastic(high, low, close)
+    stoch_k = stoch_k_series.iloc[-1]
+    
+    # 5. Penghitungan Fase (Higher Lows)
+    fase_aktif = hitung_fase_wyckoff(low)
+    
+    # Gap Sektoral (Return sejak bottom IHSG 8 Juni 2026)
+    close_after_trough = close[close.index >= TROUGH_DATE]
+    if len(close_after_trough) > 0:
+        ret_from_trough = (close_now - close_after_trough.iloc[0]) / close_after_trough.iloc[0] * 100
     else:
-        fase = "BEAR"
-    return {"harga": harga_now, "tanggal": tanggal, "drawdown_52w": drawdown_52w,
-           "fase": fase, "trough_date": TROUGH_2026_TANGGAL, "pct_dari_trough": pct_dari_trough}
-
-
-# =====================================================================
-# BACKTEST HISTORIS -- DATA STATIS, BUKAN LIVE
-# =====================================================================
-BACKTEST_HISTORIS = [
-    {"horizon": 20, "n": 7, "avg": -0.8, "pct_pos": 57.0, "worst": -9.6, "mae_avg": -5.0},
-    {"horizon": 40, "n": 7, "avg": 4.3, "pct_pos": 86.0, "worst": -1.0, "mae_avg": -5.0},
-    {"horizon": 60, "n": 7, "avg": 6.6, "pct_pos": 71.0, "worst": -2.8, "mae_avg": -5.4},
-    {"horizon": 120, "n": 7, "avg": 12.2, "pct_pos": 86.0, "worst": -8.8, "mae_avg": -7.1},
-]
-
-SEKTOR_HISTORIS_TERCEPAT = ["Barang Baku", "Energi", "Perindustrian"]
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def ambil_universe(tickers, periode="500d", batch=80):
-    keluar = {}
-    for i in range(0, len(tickers), batch):
-        chunk = [f"{t}.JK" for t in tickers[i:i + batch]]
-        try:
-            df = yf.download(chunk, period=periode, interval="1d", progress=False,
-                             auto_adjust=False, group_by="ticker", threads=True)
-        except Exception:
-            continue
-        for sym in chunk:
-            kode = sym[:-3]
-            try:
-                sub = df[sym] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna()
-                if len(sub) >= 25:
-                    keluar[kode] = sub
-            except Exception:
-                continue
-    return keluar
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def ambil_info(ticker):
-    try:
-        return yf.Ticker(f"{ticker}.JK").info
-    except Exception:
-        return {}
-
-
-# =====================================================================
-# RSS BERITA -- VERSI SEDERHANA (30 Agu 2026)
-# =====================================================================
-RSS_KEYWORD_NEGATIF = [
-    "gagal bayar", "pailit", "bangkrut", "delisting", "suspend", "korupsi",
-    "gugatan", "kasus dugaan", "penipuan", "skandal", "pkpu", "rugi besar",
-    "turun tajam", "anjlok", "diperiksa", "tersangka",
-]
-
-RSS_SITUS_KREDIBEL = ["kontan.co.id", "bisnis.com", "emitennews.com", "katadata.co.id"]
-
-RSS_KEYWORD_POSITIF = [
-    "laba naik", "laba melonjak", "untung besar", "ekspansi", "akuisisi",
-    "kinerja solid", "rekomendasi beli", "buyback", "dividen jumbo",
-    "kontrak baru", "penghargaan", "pulih", "prospek cerah", "genjot produksi",
-]
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def cek_rss_negatif(ticker):
-    """Mengembalikan dict berisi berita PALING BARU (apapun sentimennya) + status exclude."""
-    import email.utils
-    import urllib.parse
-    import xml.etree.ElementTree as ET
-    situs_q = " OR ".join(f"site:{s}" for s in RSS_SITUS_KREDIBEL)
-    q = f"saham {ticker} ({situs_q})"
-    kosong = {"negatif": False, "judul": None, "tanggal": None, "sentimen": None,
-             "n_berita": 0, "gagal": False}
-    try:
-        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=id&gl=ID&ceid=ID:id"
-        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        root = ET.fromstring(r.content)
-        berita = []
-        for item in root.findall(".//item")[:5]:
-            title_el = item.find("title")
-            date_el = item.find("pubDate")
-            title = title_el.text if title_el is not None else ""
-            tgl_raw = date_el.text if date_el is not None else None
-            try:
-                tgl = email.utils.parsedate_to_datetime(tgl_raw) if tgl_raw else None
-            except Exception:
-                tgl = None
-            berita.append((title, tgl))
-        if not berita:
-            return kosong
-        berita.sort(key=lambda x: x[1] or pd.Timestamp.min.tz_localize("UTC"), reverse=True)
-        judul_terbaru, tgl_terbaru = berita[0]
-        judul_lower = judul_terbaru.lower()
-        tgl_str = tgl_terbaru.strftime("%d %b %Y") if tgl_terbaru else "tanggal tidak diketahui"
-
-        sentimen = "netral"
-        negatif = False
-        for kw in RSS_KEYWORD_NEGATIF:
-            if kw in judul_lower:
-                sentimen = "negatif"
-                negatif = True
-                break
-        if sentimen == "netral":
-            for kw in RSS_KEYWORD_POSITIF:
-                if kw in judul_lower:
-                    sentimen = "positif"
-                    break
-
-        return {"negatif": negatif, "judul": judul_terbaru, "tanggal": tgl_str,
-               "sentimen": sentimen, "n_berita": len(berita), "gagal": False}
-    except Exception:
-        return {**kosong, "gagal": True}
-
-
-# =====================================================================
-# TAHAP 1 -- FASE IHSG
-# =====================================================================
-def cari_episode_bear(close):
-    roll_max = close.rolling(252, min_periods=50).max()
-    drawdown = (close - roll_max) / roll_max
-    in_bear = drawdown <= BEAR_THRESHOLD
-    raw, start = [], None
-    for date, flag in in_bear.items():
-        if flag and start is None:
-            start = date
-        if not flag and start is not None:
-            raw.append((start, date)); start = None
-    if start is not None:
-        raw.append((start, in_bear.index[-1]))
-    merged = []
-    for s, e in raw:
-        if merged and (s - merged[-1][1]).days < 90:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
-    return [(s, e) for s, e in merged if (e - s).days >= 20]
-
-
-def hitung_episode(close):
-    episodes = []
-    for peak_date, episode_end in cari_episode_bear(close):
-        seg = close[peak_date:episode_end]
-        trough_date = seg.idxmin()
-        trough_price = seg.min()
-        target = trough_price * (1 + REBOUND_TRIGGER)
-        after = close[trough_date:]
-        hit = after[after >= target]
-        if len(hit) == 0:
-            continue
-        signal_date, signal_price = hit.index[0], hit.iloc[0]
-        future = close[close.index > signal_date]
-        ep = {"trough_date": trough_date, "signal_date": signal_date,
-              "signal_price": signal_price, "ongoing": len(future) < 20}
-        if not ep["ongoing"]:
-            fwd = {}
-            mae = {}
-            for h in [20, 40, 60, 120]:
-                if len(future) >= h:
-                    fwd[h] = (future.iloc[h-1] - signal_price) / signal_price * 100
-                    window = future.iloc[:h]
-                    mae[h] = (window.min() - signal_price) / signal_price * 100
-                else:
-                    ep["ongoing"] = True
-            ep["forward"] = fwd
-            ep["mae"] = mae
-        episodes.append(ep)
-    return episodes
-
-
-def ringkas_backtest(episodes):
-    completed = [e for e in episodes if not e["ongoing"]]
-    rows = []
-    for h in [20, 40, 60, 120]:
-        rets = [e["forward"][h] for e in completed if h in e.get("forward", {})]
-        maes = [e["mae"][h] for e in completed if h in e.get("mae", {})]
-        if not rets:
-            continue
-        rows.append({"horizon": h, "n": len(rets), "avg": np.mean(rets),
-                    "pct_pos": sum(1 for r in rets if r > 0) / len(rets) * 100,
-                    "worst": min(rets), "mae_avg": np.mean(maes)})
-    return rows
-
-
-def status_ihsg(close, episodes):
-    if len(close) == 0:
-        return None
-    last_price, last_date = close.iloc[-1], close.index[-1]
-    roll_max = close.rolling(252, min_periods=50).max()
-    dd_now = (last_price - roll_max.iloc[-1]) / roll_max.iloc[-1] * 100
-    ongoing = [e for e in episodes if e["ongoing"]]
-    out = {"tanggal": last_date, "harga": last_price, "drawdown_52w": dd_now}
-    if ongoing:
-        ep = ongoing[-1]
-        pct_dari_trough = (last_price - close[ep["trough_date"]]) / close[ep["trough_date"]] * 100
-        if pct_dari_trough >= NORMALIZING_TRIGGER * 100:
-            fase = "NORMALIZING"
-        elif pct_dari_trough >= REBOUND_TRIGGER * 100:
-            fase = "BOTTOM-REBOUND"
-        else:
-            fase = "BEAR"
-        out.update({"fase": fase, "trough_date": ep["trough_date"], "pct_dari_trough": pct_dari_trough})
-    else:
-        out.update({"fase": "NORMAL", "trough_date": None, "pct_dari_trough": None})
-    return out
-
-
-def traffic_light(fase, backtest):
-    if fase == "BOTTOM-REBOUND":
-        return "🟢", "Fase rebound awal — syarat sektor & saham aktif dicari"
-    if fase == "NORMALIZING":
-        b40 = next((b for b in backtest if b["horizon"] == 40), None)
-        if b40 and b40["pct_pos"] >= 70:
-            return "🟡", "Sudah lewat fase awal (>20% dari bottom) — masih ada peluang tapi tidak seoptimal fase rebound awal"
-        return "🟡", "Fase transisi — perlu lebih selektif"
-    if fase == "BEAR":
-        return "🔴", "Masih tren turun, belum ada konfirmasi rebound"
-    return "🔴", "Tidak ada bear market aktif — strategi ini dirancang khusus untuk fase bottom-rebound"
-
-
-# =====================================================================
-# TAHAP 2 -- SEKTOR
-# =====================================================================
-def status_sektor(harga_map, trough_date):
-    hasil = []
-    for sektor, tickers in SECTOR_BASKETS.items():
-        rets = []
-        for t in tickers:
-            if t not in harga_map:
-                continue
-            s = harga_map[t]["Close"]
-            s_after = s[s.index >= trough_date]
-            if len(s_after) < 2:
-                continue
-            rets.append((s_after.iloc[-1] - s_after.iloc[0]) / s_after.iloc[0] * 100)
-        if rets:
-            hasil.append({"sektor": sektor, "return": float(np.mean(rets)), "n": len(rets)})
-    hasil.sort(key=lambda x: -x["return"])
-    for i, r in enumerate(hasil):
-        r["ranking"] = i + 1
-        r["bergerak"] = r["return"] > 0
-    return hasil
-
-
-# =====================================================================
-# TAHAP 3 -- KANDIDAT EMITEN
-# =====================================================================
-def metrik_saham(harga_map, ticker, sector_avg, trough_date):
-    if ticker not in harga_map:
-        return None
-    df = harga_map[ticker]
-    close, volume = df["Close"], df["Volume"]
-    open_ = df["Open"] if "Open" in df.columns else None
-    high_ = df["High"] if "High" in df.columns else None
-    low_ = df["Low"] if "Low" in df.columns else None
-    if len(close) < 25:
-        return None
-    close_after = close[close.index >= trough_date]
-    if len(close_after) < 2:
-        return None
-    stock_return = (close_after.iloc[-1] - close_after.iloc[0]) / close_after.iloc[0] * 100
-    gap = stock_return - sector_avg
-    vol_5h, vol_20h = volume.tail(5).mean(), volume.tail(20).mean()
-    vol_ratio_5h = vol_5h / vol_20h if vol_20h > 0 else 0
-    vol_ratio_today = volume.iloc[-1] / vol_20h if vol_20h > 0 else 0
-    low_recent = close.tail(5).min()
-    low_prior = close.tail(40).head(20).min() if len(close) >= 40 else close.min()
-    higher_low = low_recent > low_prior
-    value_sesi_ini = float(close.iloc[-1] * volume.iloc[-1])
-    value_rata_20h = float((close * volume).tail(20).mean())
-    roll_max = close.rolling(min(len(close), 750), min_periods=50).max()
-    dd = (close - roll_max) / roll_max * 100
-    max_dd = float(dd.min()) if not dd.isna().all() else 0.0
-    candle_hijau = bool(close.iloc[-1] > open_.iloc[-1]) if open_ is not None else None
-    lari_hari_ini = float((close.iloc[-1] - open_.iloc[-1]) / open_.iloc[-1]) if open_ is not None and open_.iloc[-1] > 0 else None
-
-    # --- basis rapi: rentang harga BASIS_LOOKBACK hari SEBELUM hari ini (exclude hari
-    # ini sendiri -- biar tidak sirkular dengan breakout yang mau dikonfirmasi) ---
-    rentang_basis = None
-    if high_ is not None and low_ is not None and len(high_) > BASIS_LOOKBACK:
-        jendela_high = high_.iloc[-(BASIS_LOOKBACK + 1):-1]
-        jendela_low = low_.iloc[-(BASIS_LOOKBACK + 1):-1]
-        low_terendah = float(jendela_low.min())
-        if low_terendah > 0:
-            rentang_basis = float((jendela_high.max() - low_terendah) / low_terendah)
-
-    # --- posisi closing dalam range high-low HARI INI -- close dekat high = kuat,
-    # close dekat low walau masih > open = lemah (candle_hijau lama tidak menangkap ini) ---
-    posisi_close = None
-    if high_ is not None and low_ is not None:
-        h_today, l_today = float(high_.iloc[-1]), float(low_.iloc[-1])
-        if h_today > l_today:
-            posisi_close = float((close.iloc[-1] - l_today) / (h_today - l_today))
+        ret_from_trough = 0
 
     return {
-        "gap": gap, "vol_ratio_5h": vol_ratio_5h, "vol_ratio_today": vol_ratio_today,
-        "higher_low": higher_low, "value_sesi_ini": value_sesi_ini,
-        "value_rata_20h": value_rata_20h, "max_dd": max_dd,
-        "candle_hijau": candle_hijau, "lari_hari_ini": lari_hari_ini,
-        "rentang_basis": rentang_basis, "posisi_close": posisi_close,
-        "harga_20h": close.tail(20).tolist(), "volume_20h": volume.tail(20).tolist(),
+        "ticker": ticker,
+        "close": float(close_now),
+        "val_ma20": float(val_ma20),
+        "ll20": float(ll20),
+        "retrace_sehat": retrace_sehat,
+        "vol_ratio": float(vol_ratio),
+        "stoch_k": float(stoch_k),
+        "fase": fase_aktif,
+        "ret_from_trough": float(ret_from_trough),
+        "price_history": close.tail(45).tolist() # Untuk chart mini
     }
 
-
-def gerbang_keras(ticker, m, sector_median_dd):
-    alasan = []
-    if ticker in PAPAN_PENGEMBANGAN:
-        alasan.append("Papan Pengembangan")
-    if sector_median_dd != 0 and m["max_dd"] < sector_median_dd * 2.0:
-        alasan.append("drawdown historis ekstrem vs median sektor")
-    return alasan
-
-
-def penalti_berat_naik(ticker, info, sector_der_median, market_caps, beta_manual):
-    alasan = []
-    der, mcap = info.get("debtToEquity"), info.get("marketCap")
-    if der is not None and sector_der_median:
-        if der > sector_der_median * BERAT_NAIK_DER_MULTIPLIER:
-            alasan.append(f"DER {der:.0f} tinggi (dari yfinance, akurasi belum terverifikasi -- ada gap dengan sumber lain saat dicek manual)")
-    if beta_manual is not None and abs(beta_manual) < BERAT_NAIK_BETA_THRESHOLD:
-        alasan.append(f"beta {beta_manual:.2f} mendekati nol (dihitung manual vs IHSG)")
-    if mcap is not None and market_caps:
-        top_n = {t for t, _ in sorted(market_caps.items(), key=lambda x: -x[1])[:BERAT_NAIK_TOP_N_MCAP]}
-        if ticker in top_n:
-            alasan.append("saham terbesar sektor")
-    return alasan
-
-
-def skor_dan_tier(m, gate, penalty):
-    if gate:
-        return 0.0, "tidak_lolos"
-    gap_score = max(0, min(100, -m["gap"] * 2)) if m["gap"] < 0 else 0
-    part_score = (50 if m["vol_ratio_5h"] > 1.0 else 0) + (50 if m["higher_low"] else 0)
-    skor = gap_score * 0.60 + part_score * 0.40
-    if penalty:
-        skor *= BERAT_NAIK_PENALTY
-    gap_signifikan = m["gap"] <= GAP_SIGNIFIKAN_THRESHOLD
-    partisipasi_ok = m["vol_ratio_5h"] > 1.0 and m["higher_low"]
-    if gap_signifikan and partisipasi_ok:
-        tier = "kuat"
-    elif gap_signifikan:
-        tier = "menunggu"
-    else:
-        tier = "gap_kecil"
-    return round(skor, 1), tier
-
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_sectors_for_candidates(tickers):
+    sector_map = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(f"{t}.JK").info
+            sector_map[t] = info.get("sector", "Unmapped")
+        except:
+            sector_map[t] = "Unmapped"
+    return sector_map
 
 # =====================================================================
-# RADAR 5 DIMENSI (langkah awal, terinspirasi Snowflake Analysis)
+# ANTARMUKA APLIKASI
 # =====================================================================
-RADAR_LABEL = ["Gap", "Partisipasi", "Kualitas", "Sentimen", "Eksekusi"]
+st.title("Compounding Screener")
+st.markdown("Peleburan strategi **No Supply (Wyckoff)**, disiplin **Turtle**, dan **Regime Sektoral**.")
 
+# Sidebar Setup
+st.sidebar.markdown("### ⚙️ Universe Setup")
+universe_input = st.sidebar.text_area(
+    "Daftar Ticker:",
+    value="BBCA, BBRI, BMRI, BBNI, BRIS, AMMN, TPIA, BREN, BYAN, ASII, \nTLKM, UNTR, ICBP, MYOR, INCO, ANTM, PTBA, ADRO, TINS, HRTA, \nEMAS, SSMS, TOWR, AADI, CYBR, EPAC, MBSS, MUTU, GPRA, TBIG, REAL",
+    height=150
+)
+tickers_raw = [t.strip().upper() for t in universe_input.replace('\n', ',').split(',') if t.strip()]
+TICKERS = list(set(tickers_raw))
 
-def hitung_dimensi_radar(c):
-    m = c["m"]
+st.sidebar.markdown(f"**Total Ticker:** {len(TICKERS)}")
 
-    gap_dim = max(0, min(100, -m["gap"] * 3))  # -33% gap = 100
-
-    part_dim = (50 if m["vol_ratio_5h"] > 1.0 else 0) + (50 if m["higher_low"] else 0)
-
-    kualitas_dim = 100 - len(c.get("penalty", [])) * 33
-    kualitas_dim = max(0, kualitas_dim)
-
-    rss = c.get("rss")
-    if rss and rss.get("sentimen") == "positif":
-        sentimen_dim = 100
-    elif rss and rss.get("sentimen") == "negatif":
-        sentimen_dim = 0
-    elif rss and rss.get("sentimen") == "netral":
-        sentimen_dim = 50
-    else:
-        sentimen_dim = 50  # belum dicek / tidak ada data -- netral, bukan 0
-
-    # eksekusi_dim -- direvisi 3 Sep 2026 mengikuti gerbang baru Tahap 4: basis rapi,
-    # closing kuat, volume (ambang turun 4x->1.75x karena sudah dikonfirmasi basis+closing
-    # duluan), lari hari ini. 25 poin tiap sinyal, bukan lagi 60/20/20 volume-sentris lama.
-    eksekusi_dim = 0.0
-    if m.get("rentang_basis") is not None:
-        if m["rentang_basis"] <= BASIS_KETAT_MAKS:
-            eksekusi_dim += 25
-        else:
-            eksekusi_dim += max(0, 25 * (1 - (m["rentang_basis"] - BASIS_KETAT_MAKS) / BASIS_KETAT_MAKS))
-    if m.get("posisi_close") is not None:
-        eksekusi_dim += 25 if m["posisi_close"] >= CLOSE_POSISI_MIN else 25 * max(0, m["posisi_close"] / CLOSE_POSISI_MIN)
-    eksekusi_dim += min(25, m["vol_ratio_today"] / PARTICIPATION_VOL_RATIO * 25)
-    if m.get("lari_hari_ini") is not None and m["lari_hari_ini"] <= LARI_HARI_INI_MAKS:
-        eksekusi_dim += 25
-    eksekusi_dim = max(0, min(100, eksekusi_dim))
-
-    return {"Gap": round(gap_dim), "Partisipasi": round(part_dim),
-           "Kualitas": round(kualitas_dim), "Sentimen": round(sentimen_dim),
-           "Eksekusi": round(eksekusi_dim)}
-
-
-def render_radar(dimensi, judul):
-    """Warna amber redup (Opsi B) -- ganti dari kuning-emas default sebelumnya,
-    supaya konsisten dengan token warna baru dan beda karakter dari Turtle Board."""
-    nilai = [dimensi[l] for l in RADAR_LABEL] + [dimensi[RADAR_LABEL[0]]]
-    label = RADAR_LABEL + [RADAR_LABEL[0]]
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=nilai, theta=label, fill="toself", name=judul,
-        fillcolor="rgba(184,130,61,0.35)",
-        line=dict(color="rgba(184,130,61,0.9)", width=2),
-    ))
-    fig.update_layout(
-        polar=dict(
-            bgcolor="rgba(0,0,0,0)",
-            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
-                           gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
-            angularaxis=dict(tickfont=dict(size=11, color="#9C8F7A", family="IBM Plex Mono"),
-                            gridcolor="rgba(232,223,211,0.14)", linecolor="rgba(232,223,211,0.14)"),
-        ),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=False, height=240, margin=dict(l=40, r=40, t=20, b=20),
-        font=dict(color="#9C8F7A"),
-    )
-    st.plotly_chart(fig, use_container_width=True, key=f"radar_{judul}")
-
-
-# =====================================================================
-# TAHAP 4 -- BOBOT EKUITAS
-# =====================================================================
-def cek_gerbang_eksekusi(c):
-    """Gerbang eksekusi Tahap 4 -- berjenjang: basis rapi -> closing kuat -> volume
-    (konfirmasi terakhir, bukan gerbang tunggal) -> likuiditas (absolut DAN relatif
-    sektor) -> lari hari ini. FAIL-CLOSED: data tidak lengkap = gagal gerbang, bukan
-    lolos otomatis -- beda dari RSS yang fail-open, karena konsekuensi all-in ke saham
-    buruk jauh lebih mahal daripada kelewat satu sinyal (prinsip asimetri risiko).
-    Mengembalikan (lolos: bool, kategori_gagal: str|None, pesan: str|None)."""
-    m = c["m"]
-
-    if m.get("rentang_basis") is None or m["rentang_basis"] > BASIS_KETAT_MAKS:
-        r = m.get("rentang_basis")
-        r_txt = f"{r*100:.1f}%" if r is not None else "data tidak cukup"
-        return False, "basis", f"basis belum rapi (rentang {r_txt}, maks {BASIS_KETAT_MAKS*100:.0f}%)"
-
-    if m.get("posisi_close") is None or m["posisi_close"] < CLOSE_POSISI_MIN:
-        p = m.get("posisi_close")
-        p_txt = f"{p*100:.0f}%" if p is not None else "data tidak cukup"
-        return False, "closing", f"closing lemah (posisi {p_txt} dari range hari ini, min {CLOSE_POSISI_MIN*100:.0f}%)"
-
-    if m["vol_ratio_today"] < PARTICIPATION_VOL_RATIO:
-        return False, "volume", f"volume {m['vol_ratio_today']:.1f}x < {PARTICIPATION_VOL_RATIO:.2f}x"
-
-    if m["value_rata_20h"] < LIKUIDITAS_LANTAI_ABSOLUT:
-        return False, "likuiditas", (f"likuiditas rata\u00b220h Rp{m['value_rata_20h']/1e9:.1f}M "
-                                     f"< lantai Rp{LIKUIDITAS_LANTAI_ABSOLUT/1e9:.0f}M")
-
-    median_sektor = c.get("sektor_likuiditas_median")
-    if median_sektor is not None:
-        ambang_relatif = median_sektor * LIKUIDITAS_MULTIPLIER_SEKTOR
-        if m["value_rata_20h"] < ambang_relatif:
-            return False, "likuiditas", (f"likuiditas Rp{m['value_rata_20h']/1e9:.1f}M < "
-                                         f"{LIKUIDITAS_MULTIPLIER_SEKTOR*100:.0f}% median sektor "
-                                         f"(Rp{ambang_relatif/1e9:.1f}M)")
-
-    if m["lari_hari_ini"] is not None and m["lari_hari_ini"] > LARI_HARI_INI_MAKS:
-        return False, "lari", f"sudah lari {m['lari_hari_ini']*100:+.1f}% dari open (maks {LARI_HARI_INI_MAKS*100:.0f}%)"
-
-    return True, None, None
-
-
-def bobot_ekuitas(kandidat):
-    hijau = [c for c in kandidat if c["tier"] == "kuat"]
-    if not hijau:
-        return {"status": "cash_menganggur", "detail": "Tidak ada kandidat Tier hijau saat ini.", "pilihan": None}
-
-    lolos, gagal = [], {}
-    for c in hijau:
-        ok, kategori, pesan = cek_gerbang_eksekusi(c)
-        if ok:
-            lolos.append(c)
-        else:
-            gagal.setdefault(kategori, []).append(c["ticker"])
-
-    if not lolos:
-        label_kategori = {"basis": "basis belum rapi", "closing": "closing lemah",
-                          "volume": "volume kurang", "likuiditas": "likuiditas tipis",
-                          "lari": "sudah lari terlalu jauh"}
-        detail = (f"{len(hijau)} kandidat Tier hijau, belum ada yang lolos gerbang eksekusi "
-                 f"(basis rapi \u2264{BASIS_KETAT_MAKS*100:.0f}% \u2192 closing \u2265{CLOSE_POSISI_MIN*100:.0f}% range \u2192 "
-                 f"volume \u2265{PARTICIPATION_VOL_RATIO:.2f}x \u2192 likuiditas cukup \u2192 lari \u2264{LARI_HARI_INI_MAKS*100:.0f}%).")
-        for kategori, tickers in gagal.items():
-            detail += f" {len(tickers)} kandas di {label_kategori.get(kategori, kategori)} ({', '.join(tickers)})."
-        return {"status": "cash_ditahan", "detail": detail, "pilihan": None,
-               "menunggu": [c["ticker"] for c in hijau]}
-
-    # --- tie-breaker: skor Tahap 3 -> basis paling rapi -> volume (Opsi A, 3 Sep 2026) ---
-    catatan_ramai = None
-    if len(lolos) == 1:
-        pilihan, alasan = lolos[0], "satu-satunya kandidat lolos eksekusi"
-    else:
-        lolos_sorted = sorted(
-            lolos,
-            key=lambda c: (-c["skor"], c["m"]["rentang_basis"] or 1.0, -c["m"]["vol_ratio_today"])
-        )
-        pilihan = lolos_sorted[0]
-        kalah_list = [c["ticker"] for c in lolos_sorted[1:]]
-        alasan = (f"menang tie-breaker (skor {pilihan['skor']:.0f}, basis "
-                 f"{pilihan['m']['rentang_basis']*100:.1f}%) vs {', '.join(kalah_list)}")
-        if len(lolos) >= 3:
-            catatan_ramai = (f"{len(lolos)} kandidat lolos gerbang bareng hari ini -- jarang "
-                            "terjadi, layak dicermati manual apakah ini partisipasi pasar yang "
-                            "genuine luas atau gerbang kebetulan longgar hari ini.")
-
-    hasil = {"status": "all_in", "detail": alasan, "pilihan": pilihan["ticker"],
-            "kalah": [c["ticker"] for c in lolos if c["ticker"] != pilihan["ticker"]]}
-    if catatan_ramai:
-        hasil["catatan"] = catatan_ramai
-    return hasil
-
-
-# =====================================================================
-# HALAMAN
-# =====================================================================
-st.title("Regime Screener")
-
-st.sidebar.markdown("### Posisi aktif (opsional)")
-st.sidebar.caption("Isi setelah eksekusi beli, supaya sistem bisa hitung SL/trailing-lock/override regime tiap dibuka.")
-posisi_aktif = st.sidebar.checkbox("Ada posisi aktif")
-posisi = None
-if posisi_aktif:
-    p_ticker = st.sidebar.text_input("Ticker (tanpa .JK)", value="").strip().upper()
-    p_harga_beli = st.sidebar.number_input("Harga beli", min_value=0.0, value=0.0, step=1.0)
-    p_tanggal_beli = st.sidebar.date_input("Tanggal beli")
-    if p_ticker and p_harga_beli > 0:
-        posisi = {"ticker": p_ticker, "harga_beli": p_harga_beli,
-                 "tanggal_beli": pd.Timestamp(p_tanggal_beli)}
-    st.sidebar.caption("Catatan: input ini TIDAK tersimpan permanen -- hilang kalau app di-reboot atau tab ditutup. Isi ulang tiap sesi.")
-
-if st.button("🔄 Refresh data"):
-    st.cache_data.clear()
-
-@st.fragment(run_every="15m")
-def tampilkan_screener():
-    with st.spinner("Menarik harga IHSG hari ini..."):
-        harga_now, tanggal_now, ihsg_error = ambil_harga_ihsg_now()
-
-    if harga_now is None:
-        st.warning("Gagal menarik harga IHSG otomatis dari Yahoo Finance. Masukkan manual dulu supaya tetap bisa dipakai:")
-        with st.expander("Detail error (opsional, buat didiagnosis nanti)"):
-            st.code(ihsg_error or "Tidak ada pesan error tercatat.")
-        harga_now = st.number_input("Harga IHSG hari ini", min_value=0.0, value=6500.0, step=0.01)
-        tanggal_now = pd.Timestamp.now().normalize()
-        if harga_now <= 0:
-            st.stop()
-
-    ihsg = status_ihsg_ringan(harga_now, tanggal_now)
-    backtest = BACKTEST_HISTORIS
-
-    # --- Tahap 1: panel berjenjang (angka besar + label kecil) menggantikan
-    # baris "IHSG NORMALIZING · 6600 · +23.5%" yang disambung titik tengah.
-    light, note = traffic_light(ihsg["fase"], backtest)
-    fase_class = "karat" if ihsg["fase"] == "BEAR" else ""
-    st.markdown(f"""
-    <div class="rs-panel {fase_class}">
-      <div class="rs-label">{light} IHSG · {ihsg['fase']}</div>
-      <div class="rs-angka">{ihsg['harga']:,.0f}</div>
-      <div class="rs-sub">{ihsg['pct_dari_trough']:+.1f}% dari titik terendah</div>
-    </div>
-    """.replace(",", "."), unsafe_allow_html=True)
-    st.caption(note)
-    with st.expander("Detail backtest historis (7 episode sejak 2000)"):
-        st.dataframe(
-            [{"Horizon": f"{b['horizon']}h", "Rata² return": f"{b['avg']:+.1f}%",
-              "% Positif": f"{b['pct_pos']:.0f}%", "Terburuk": f"{b['worst']:+.1f}%",
-              "MAE rata²": f"{b['mae_avg']:+.1f}%"} for b in backtest],
-            hide_index=True, width="stretch",
-        )
-        st.caption("Data statis, dihitung dari histori Yahoo Finance per 30 Agustus 2026 -- "
-                  "bukan ditarik ulang tiap app dibuka, karena episode-episode ini sudah selesai.")
-
-    if ihsg["fase"] == "NORMAL" or ihsg["trough_date"] is None:
-        st.info("IHSG tidak sedang dalam bear market aktif — Tahap 2-4 tidak relevan saat ini.")
+if st.button("🚀 Jalankan Screener"):
+    if not TICKERS:
+        st.warning("Masukkan setidaknya 1 ticker.")
+        st.stop()
+        
+    with st.spinner(f"Menarik harga & volume {len(TICKERS)} saham..."):
+        df_market = fetch_market_data(TICKERS)
+        
+    if df_market is None:
         st.stop()
 
-    with st.spinner("Menarik data saham universe..."):
-        harga_map = ambil_universe(tuple(ALL_TICKERS))
-
-    if not harga_map:
-        st.warning("Gagal menarik data saham (Tahap 2-4) dari Yahoo Finance saat ini. "
-                  "Tahap 1 di atas tetap bisa dipakai. Tekan Refresh data untuk coba lagi.")
-        st.stop()
-
-    # --- Tahap 2: panel berjenjang + bar horizontal ranking sektor, menggantikan
-    # daftar titik-titik "#1 Sektor — return% (n saham) · status".
-    sektor = status_sektor(harga_map, ihsg["trough_date"])
-    sektor_top = sektor[0]["sektor"] if sektor else "-"
-    st.markdown(f"""
-    <div class="rs-panel">
-      <div class="rs-label">🏆 Sektor teratas</div>
-      <div class="rs-angka" style="font-size:24px">{sektor_top}</div>
-      <div class="rs-sub">{len(sektor)} sektor dipantau</div>
-    </div>
-    """, unsafe_allow_html=True)
-    if sektor:
-        max_ret = max(abs(s["return"]) for s in sektor) or 1
-        bars_html = ""
-        for s in sektor:
-            lebar = min(100, abs(s["return"]) / max_ret * 100)
-            titik = "🟢" if s["bergerak"] else "⚪"
-            bars_html += f"""<div class="rs-sektor-row">
-              <span class="rs-sektor-nama">{titik} #{s['ranking']} {s['sektor']}</span>
-              <div class="rs-sektor-bar-bg"><div class="rs-sektor-bar-isi" style="width:{lebar:.0f}%"></div></div>
-              <span class="rs-sektor-nilai">{s['return']:+.1f}%</span>
-            </div>"""
-        st.markdown(bars_html, unsafe_allow_html=True)
-    with st.expander("Referensi historis sektor tercepat"):
-        st.caption(f"Sektor yang biasanya paling cepat bergerak di fase bottom-rebound adalah "
-                  f"{', '.join(SEKTOR_HISTORIS_TERCEPAT)} (dari episode 2020 & 2025) — "
-                  f"tapi pola tiap siklus bisa beda, lihat ranking live di atas.")
-
-    ihsg_beta_series = ambil_ihsg_untuk_beta()
-    sector_return_map = {s["sektor"]: s["return"] for s in sektor}
-
-    # --- Tahap 3
-    st.subheader("Kandidat emiten")
-    kandidat = []
-    for sektor_nama, tickers in SECTOR_BASKETS.items():
-        sector_avg = sector_return_map.get(sektor_nama, 0)
-        if sector_avg <= 0:
-            continue
-        dd_values, der_values, likuiditas_values = [], [], []
-        market_caps, infos, metrics_map, betas = {}, {}, {}, {}
-        for t in tickers:
-            m = metrik_saham(harga_map, t, sector_avg, ihsg["trough_date"])
-            if m is None:
-                continue
-            metrics_map[t] = m
-            dd_values.append(m["max_dd"])
-            likuiditas_values.append(m["value_rata_20h"])
-            info = ambil_info(t)
-            infos[t] = info
-            if info.get("marketCap"):
-                market_caps[t] = info["marketCap"]
-            if sektor_nama not in SEKTOR_FINANSIAL and info.get("debtToEquity"):
-                der_values.append(info["debtToEquity"])
-            if t in harga_map and len(ihsg_beta_series) > 0:
-                betas[t] = hitung_beta(harga_map[t]["Close"], ihsg_beta_series)
-        sector_median_dd = float(np.median(dd_values)) if dd_values else 0
-        sector_der_median = float(np.median(der_values)) if der_values else None
-        # Median likuiditas sektor -- cuma dipercaya kalau sampel cukup (>=5, prinsip
-        # robust-statistics: median dari sampel kecil rentan diguncang satu outlier).
-        sector_likuiditas_median = (float(np.median(likuiditas_values))
-                                    if len(likuiditas_values) >= LIKUIDITAS_MIN_N_SEKTOR else None)
-        for t, m in metrics_map.items():
-            gate = gerbang_keras(t, m, sector_median_dd)
-            penalty = [] if gate or sektor_nama in SEKTOR_FINANSIAL else penalti_berat_naik(
-                t, infos.get(t, {}), sector_der_median, market_caps, betas.get(t))
-            skor, tier = skor_dan_tier(m, gate, penalty)
-            kandidat.append({"ticker": t, "sektor": sektor_nama, "skor": skor, "tier": tier,
-                             "gate": gate, "penalty": penalty, "m": m,
-                             "sektor_likuiditas_median": sector_likuiditas_median,
-                             "sektor_likuiditas_n": len(likuiditas_values)})
-
-    kandidat.sort(key=lambda c: -c["skor"])
-
-    with st.spinner("Cek berita terbaru untuk kandidat teratas..."):
-        for c in kandidat:
-            if c["tier"] in ("kuat", "menunggu"):
-                rss = cek_rss_negatif(c["ticker"])
-                c["rss"] = rss
-                if rss["negatif"]:
-                    c["tier"] = "tidak_lolos"
-                    c["gate"] = c["gate"] + [f"RSS negatif ({rss['tanggal']}): {rss['judul']}"]
-                    c["skor"] = 0.0
-
-    eq = bobot_ekuitas(kandidat)
-    shown_kuat = [c for c in kandidat if c["tier"] == "kuat"]
-    shown_menunggu = [c for c in kandidat if c["tier"] == "menunggu"]
-
-    def render_kartu_kuat(c):
-        """Kartu Tier Kuat -- radar jadi elemen utama, badge berwarna sesuai token
-        (amber = all-in, krem pudar = tahan/kandidat), bukan teks emoji polos."""
-        if eq["pilihan"] == c["ticker"]:
-            badge_html = '<span class="rs-badge rs-badge-allin">● ALL-IN</span>'
-        elif c["ticker"] in eq.get("menunggu", []):
-            badge_html = '<span class="rs-badge rs-badge-tahan">CASH DITAHAN</span>'
-        else:
-            badge_html = '<span class="rs-badge rs-badge-kandidat">KANDIDAT</span>'
-        m = c["m"]
-        with st.container(border=True):
-            col1, col2 = st.columns([2, 1])
-            col1.markdown(f"### {c['ticker']}")
-            col2.markdown(f"<div style='text-align:right;padding-top:14px'>{badge_html}</div>",
-                          unsafe_allow_html=True)
-            render_radar(hitung_dimensi_radar(c), c["ticker"])
-            if eq["pilihan"] == c["ticker"]:
-                st.line_chart(m["harga_20h"], height=100)
-            with st.expander("Detail"):
-                candle_txt = {True: "🟩 hijau", False: "🟥 merah", None: "?"}[m["candle_hijau"]]
-                lari_txt = f" · Lari {m['lari_hari_ini']*100:+.1f}%" if m.get("lari_hari_ini") is not None else ""
-                st.caption(f"{c['sektor']} · Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · "
-                          f"{candle_txt}{lari_txt} · Rp{m['value_sesi_ini']/1e9:.0f}M hari ini")
-                basis_txt = f"{m['rentang_basis']*100:.1f}%" if m.get("rentang_basis") is not None else "data kurang"
-                closing_txt = f"{m['posisi_close']*100:.0f}%" if m.get("posisi_close") is not None else "data kurang"
-                st.caption(f"Basis {basis_txt} (maks {BASIS_KETAT_MAKS*100:.0f}%) · "
-                          f"Closing {closing_txt} dari range (min {CLOSE_POSISI_MIN*100:.0f}%) · "
-                          f"Likuiditas rata²20h Rp{m['value_rata_20h']/1e9:.1f}M")
-                if c["penalty"]:
-                    st.caption(f"⚠️ {', '.join(c['penalty'])}")
-                if c.get("rss", {}).get("gagal"):
-                    st.caption("📡 RSS gagal dicek")
-                elif c.get("rss") and c["rss"]["judul"]:
-                    emoji_sentimen = {"positif": "🟢", "negatif": "🔴", "netral": "⚪"}.get(c["rss"]["sentimen"], "⚪")
-                    st.caption(f"📡 {emoji_sentimen} ({c['rss']['tanggal']}) {c['rss']['judul']}")
-                elif "rss" in c:
-                    st.caption("📡 Tidak ada berita ditemukan")
-
-    def render_kartu_ringkas(c):
-        m = c["m"]
-        candle_txt = {True: "🟩", False: "🟥", None: "?"}[m["candle_hijau"]]
-        with st.container(border=True):
-            st.write(f"**{c['ticker']}** · {c['sektor']}")
-            st.caption(f"Gap {m['gap']:+.1f}% · Vol {m['vol_ratio_today']:.1f}x · {candle_txt} · Value Rp{m['value_sesi_ini']/1e9:.0f}M")
-
-    if not shown_kuat and not shown_menunggu:
-        st.info("Tidak ada kandidat lolos gerbang saat ini.")
-
-    if shown_kuat:
-        for c in shown_kuat:
-            render_kartu_kuat(c)
-
-    if shown_menunggu:
-        with st.expander(f"Tier menunggu konfirmasi · {len(shown_menunggu)} saham (belum ada sinyal partisipasi)"):
-            for c in shown_menunggu:
-                render_kartu_ringkas(c)
-
-    excluded_rss = [c for c in kandidat if c.get("rss", {}).get("negatif")]
-    if excluded_rss:
-        with st.expander(f"⛔ {len(excluded_rss)} kandidat dibuang karena RSS negatif -- review manual di sini"):
-            for c in excluded_rss:
-                st.write(f"**{c['ticker']}** ({c['rss']['tanggal']})")
-                st.caption(c["rss"]["judul"])
-
-    # --- Tahap 4: panel berjenjang untuk status bobot ekuitas
-    st.subheader("Tahap 4 — Bobot Ekuitas")
-    status_label = {"all_in": "All-in", "cash_ditahan": "Cash Ditahan", "cash_menganggur": "Cash Menganggur"}
-    status_icon = {"all_in": "🟢", "cash_ditahan": "🟡", "cash_menganggur": "⚪"}
-    eq_class = "" if eq["status"] == "all_in" else ""
-    st.markdown(f"""
-    <div class="rs-panel {eq_class}">
-      <div class="rs-label">{status_icon.get(eq['status'], '')} Status</div>
-      <div class="rs-angka" style="font-size:22px">{status_label.get(eq['status'], eq['status'])}</div>
-      <div class="rs-sub">{eq['detail']}</div>
-    </div>
-    """, unsafe_allow_html=True)
-    if eq.get("catatan"):
-        st.warning(eq["catatan"])
-
-    # --- Manajemen Posisi Aktif (SL keras + trailing-lock + override regime)
-    if posisi:
-        st.subheader("Manajemen Posisi Aktif")
-        p_ticker, p_entry, p_tgl = posisi["ticker"], posisi["harga_beli"], posisi["tanggal_beli"]
-        if p_ticker in harga_map:
-            harga_posisi = harga_map[p_ticker]["Close"]
-        else:
-            data_p = ambil_universe((p_ticker,))
-            harga_posisi = data_p.get(p_ticker, {}).get("Close") if data_p else None
-            if harga_posisi is None:
-                harga_posisi = pd.Series(dtype=float)
-
-        harga_sejak_beli = harga_posisi[harga_posisi.index >= p_tgl]
-        if len(harga_sejak_beli) == 0:
-            st.warning(f"Tidak ada data harga {p_ticker} sejak tanggal beli -- cek ticker/tanggal, atau data belum tersedia.")
-        else:
-            harga_now_p = float(harga_sejak_beli.iloc[-1])
-            peak_p = float(harga_sejak_beli.max())
-            return_now = (harga_now_p - p_entry) / p_entry
-            peak_return = (peak_p - p_entry) / p_entry
-            sl_keras_harga = p_entry * (1 + SL_KERAS_PCT)
-            trailing_aktif = peak_return >= TRAILING_AKTIF_GAIN
-            trailing_floor = p_entry * (1 + TRAILING_LOCK_PCT * peak_return) if trailing_aktif else None
-            regime_bear = ihsg["fase"] == "BEAR"
-
-            if harga_now_p <= sl_keras_harga:
-                rekom, alasan = "🔴 EXIT", f"SL keras {SL_KERAS_PCT*100:.0f}% kena (harga {harga_now_p:.0f} <= {sl_keras_harga:.0f})"
-            elif regime_bear:
-                rekom, alasan = "🔴 EXIT", "IHSG sudah balik ke fase BEAR -- override regime, keluar terlepas status trailing-lock"
-            elif trailing_aktif and harga_now_p <= trailing_floor:
-                rekom, alasan = "🔴 EXIT", f"Trailing-lock kena (harga {harga_now_p:.0f} <= floor {trailing_floor:.0f})"
-            elif trailing_aktif:
-                rekom, alasan = "🟢 HOLD", f"Trailing-lock aktif, floor saat ini {trailing_floor:.0f}"
+    candidates_raw = []
+    
+    with st.spinner("Memproses Gerbang Keras & Pendeteksi Fase..."):
+        for t in TICKERS:
+            if isinstance(df_market.columns, pd.MultiIndex):
+                if f"{t}.JK" in df_market.columns.get_level_values(0):
+                    df_stock = df_market[f"{t}.JK"]
+                else: continue
             else:
-                rekom, alasan = "🟡 HOLD (belum ada proteksi profit)", f"Gain {return_now*100:+.1f}%, trailing-lock aktif di gain >={TRAILING_AKTIF_GAIN*100:.0f}%. SL keras di {sl_keras_harga:.0f}."
+                df_stock = df_market
+                
+            metrics = analyze_stock(df_stock, t)
+            if not metrics: continue
+                
+            # Gerbang Keras
+            if metrics["val_ma20"] < MIN_LIQUIDITY: continue
+            if not metrics["retrace_sehat"]: continue
+            if metrics["stoch_k"] >= STOCH_K_MAX: continue
+            if metrics["vol_ratio"] >= VOL_RATIO_MAX: continue
+            
+            candidates_raw.append(metrics)
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Harga sekarang", f"{harga_now_p:.0f}", f"{return_now*100:+.1f}%")
-            c2.metric("SL keras", f"{sl_keras_harga:.0f}")
-            c3.metric("Trailing floor", f"{trailing_floor:.0f}" if trailing_floor else "belum aktif")
-            st.write(f"**{rekom}**")
-            st.caption(alasan)
+    if not candidates_raw:
+        st.info("Tidak ada saham yang lolos semua gerbang (Likuiditas, LL20, Stoch < 80, No Supply).")
+        st.stop()
 
-    st.divider()
-    st.caption(f"Diperbarui: {datetime.now(WIB).strftime('%d %b %Y %H:%M')} WIB · "
-              "Harga IHSG & saham di-cache ≤15 menit, data fundamental (DER/marketCap) ≤1 jam -- "
-              "jam di atas itu waktu render halaman, bukan jaminan data sesegar itu. "
-              "Universe saat ini: basket representatif per sektor (belum universe 840 emiten penuh). "
-              "Data historis, bukan sinyal beli/jual. Bukan nasihat keuangan.")
+    # Hitung Sektor & Gap
+    with st.spinner("Menarik label sektor & menghitung Gap..."):
+        valid_tickers = [c["ticker"] for c in candidates_raw]
+        sector_map = fetch_sectors_for_candidates(valid_tickers)
+        
+        sector_returns = {}
+        for c in candidates_raw:
+            skt = sector_map[c["ticker"]]
+            sector_returns.setdefault(skt, []).append(c["ret_from_trough"])
+            
+        sector_avg_map = {skt: np.mean(rets) for skt, rets in sector_returns.items()}
+        
+        for c in candidates_raw:
+            skt = sector_map[c["ticker"]]
+            c["sektor"] = skt
+            c["sector_avg"] = sector_avg_map[skt]
+            c["gap_sektoral"] = c["ret_from_trough"] - c["sector_avg"]
 
-tampilkan_screener()
+    # Urutkan berdasarkan Fase paling segar (0 atau 1) lalu Suplai terkering
+    candidates_raw.sort(key=lambda x: (x["fase"], x["vol_ratio"]))
+
+    st.subheader(f"🎯 {len(candidates_raw)} Kandidat Compounding")
+    st.caption("Sizing: 30% di awal, +70% jika retrace tetap di atas LL20 dan Oversold (Stochastic < 80).")
+    
+    for c in candidates_raw:
+        gap_color = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
+        stoch_color = "var(--green)" if c["stoch_k"] < 30 else "var(--text)"
+        
+        # Peringatan Fase > 2
+        fase_label = "Awal (Fresh)" if c["fase"] <= 1 else ("Lanjutan" if c["fase"] == 2 else "RAWAN (Bahaya)")
+        badge_fase_class = "badge-fase-aman" if c["fase"] <= 2 else "badge-fase-bahaya"
+        
+        fig = go.Figure(go.Scatter(y=c["price_history"], mode='lines', line=dict(color='#B8823D', width=2)))
+        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150,
+                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                          xaxis=dict(visible=False), yaxis=dict(visible=False))
+
+        st.markdown(f"""
+        <div class="compounding-card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <span class="compounding-title">{c['ticker']}</span>
+                    <span class="badge badge-sektor">{c['sektor']}</span>
+                    <span class="badge {badge_fase_class}">Fase {c['fase']} : {fase_label}</span>
+                </div>
+            </div>
+            <div class="metric-row">
+                <div class="metric-item">Vol Ratio: <span class="metric-val" style="color:var(--green)">{c['vol_ratio']:.2f}x</span></div>
+                <div class="metric-item">Stochastic K: <span class="metric-val" style="color:{stoch_color}">{c['stoch_k']:.1f}</span></div>
+                <div class="metric-item">Value 20H: <span class="metric-val">Rp {c['val_ma20']/1e9:.1f}M</span></div>
+                <div class="metric-item">Batas SL (LL20): <span class="metric-val" style="color:var(--red)">{c['ll20']:,.0f}</span></div>
+                <div class="metric-item">Gap Sektor: <span class="metric-val" style="color:{gap_color}">{c['gap_sektoral']:+.1f}%</span></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
