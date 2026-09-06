@@ -1,13 +1,13 @@
 """
-COMPOUNDING SCREENER
-====================
-Peleburan Wyckoff (No Supply), Turtle (Disiplin), dan Regime (Laggard Gap).
-Fokus: Mencari saham Fase 1-2 (bertahan di atas Lowest Low 20) dengan indikasi 
-No Supply (Volume MA10/MA30 < 1.0) dan momentum segar (Stochastic K < 80).
-Dilengkapi deteksi Fase Kenaikan dan jarak dari dasar 120 hari ke belakang.
+COMPOUNDING SCREENER & SWING CYCLE
+==================================
+Sistem penyaringan saham berbasis siklus:
+1. Tahap 0: Likuiditas >= Rp1M & Detak Jantung (Range) >= 5%
+2. Tahap 1: Wyckoff Absorption (Close >= LL20 & Vol Ratio < 1.0)
+3. Tahap 2: Pembagian Keranjang (Keranjang 30% Breakout vs Keranjang 70% Retrace Oversold)
 
 Jalankan: streamlit run compounding_screener.py
-Kebutuhan: streamlit yfinance pandas numpy plotly
+Kebutuhan library: streamlit yfinance pandas numpy plotly
 """
 
 import numpy as np
@@ -17,11 +17,11 @@ import streamlit as st
 import yfinance as yf
 from datetime import timedelta, timezone
 
-st.set_page_config(page_title="Compounding Screener", layout="wide")
+st.set_page_config(page_title="Compounding Screener", layout="wide", initial_sidebar_state="expanded")
 WIB = timezone(timedelta(hours=7))
 
 # =====================================================================
-# TEMA VISUAL (Dark Clean)
+# TEMA VISUAL UI
 # =====================================================================
 st.markdown("""
 <style>
@@ -31,12 +31,12 @@ st.markdown("""
   --bg: #101014;
   --card: #1A1A20;
   --card-line: #2C2C35;
-  --accent: #B8823D;
+  --accent-1: #B8823D; /* Amber untuk Breakout */
+  --accent-2: #5C8BC6; /* Biru untuk Retrace */
   --text: #E0E0E5;
   --text-dim: #8B8B99;
   --green: #4E9F3D;
   --red: #D9534F;
-  --warn: #E2B93B;
 }
 
 .stApp { background-color: var(--bg); }
@@ -44,19 +44,24 @@ st.markdown("""
 h1, h2, h3 { font-family: 'Space Grotesk', sans-serif !important; color: var(--text) !important; }
 [data-testid="stMetricValue"], code, .stMarkdown code { font-family: 'IBM Plex Mono', monospace !important; }
 
-.compounding-card {
+.card-breakout {
   background: var(--card); border: 1px solid var(--card-line);
   padding: 16px; border-radius: 8px; margin-bottom: 12px;
-  border-left: 4px solid var(--accent);
+  border-left: 4px solid var(--accent-1);
 }
-.compounding-title { font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 700; }
+.card-retrace {
+  background: var(--card); border: 1px solid var(--card-line);
+  padding: 16px; border-radius: 8px; margin-bottom: 12px;
+  border-left: 4px solid var(--accent-2);
+}
+
+.stock-title { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 700; }
 .badge {
   font-family: 'IBM Plex Mono', monospace; font-size: 11px;
   padding: 4px 10px; border-radius: 12px; margin-left: 8px;
 }
-.badge-sektor { background: rgba(184, 130, 61, 0.15); color: var(--accent); border: 1px solid rgba(184, 130, 61, 0.3); }
-.badge-fase-aman { background: rgba(78, 159, 61, 0.15); color: var(--green); border: 1px solid rgba(78, 159, 61, 0.3); }
-.badge-fase-bahaya { background: rgba(217, 83, 79, 0.15); color: var(--red); border: 1px solid rgba(217, 83, 79, 0.3); }
+.badge-sektor { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); border: 1px solid rgba(255,255,255,0.1); }
+.badge-fase { background: rgba(184, 130, 61, 0.15); color: var(--accent-1); border: 1px solid rgba(184, 130, 61, 0.3); }
 
 .metric-row { display: flex; gap: 15px; margin-top: 10px; flex-wrap: wrap; }
 .metric-item { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); }
@@ -65,17 +70,18 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif !important; color: var(--t
 """, unsafe_allow_html=True)
 
 # =====================================================================
-# PARAMETER SISTEM
+# PARAMETER SISTEM MUTLAK
 # =====================================================================
 MIN_LIQUIDITY = 1_000_000_000  # Rp 1 Miliar
+MIN_HEARTBEAT = 0.05           # 5% rentang harga 20H
 VOL_RATIO_MAX = 1.0            # VMA10 / VMA30
-STOCH_K_MAX = 80               # Batas overbought
-LL_PERIOD = 20                 # Lowest Low 20 hari (Batas SL)
-LOOKBACK_PHASE = 120           # 120 hari ke belakang untuk Titik Nol Fase
-TROUGH_DATE = pd.Timestamp("2026-06-08") # Untuk Gap Sektoral
+STOCH_OVERSOLD = 30            # Batas Oversold untuk Retrace Entry
+LL_PERIOD = 20                 # Jendela Turtle (20 Hari)
+LOOKBACK_PHASE = 120           # 120 hari untuk menghitung fase makro
+TROUGH_DATE = pd.Timestamp("2026-06-08") # Bottom IHSG
 
 # =====================================================================
-# FUNGSI PERHITUNGAN
+# ENGINE PERHITUNGAN
 # =====================================================================
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_market_data(tickers, period="6mo"):
@@ -95,38 +101,34 @@ def calculate_stochastic(high, low, close, k_window=14):
     return stoch_k
 
 def hitung_fase_wyckoff(low_series):
-    if len(low_series) < 60:
-        return 0
-        
+    if len(low_series) < 60: return 0
     low_120 = low_series.tail(LOOKBACK_PHASE)
     ground_zero_idx = low_120.argmin()
     ground_zero_val = low_120.iloc[ground_zero_idx]
     
     low_after_gz = low_120.iloc[ground_zero_idx:]
-    if len(low_after_gz) < 10:
-        return 0
+    if len(low_after_gz) < 10: return 0
         
     swing_lows = []
-    for i in range(4, len(low_after_gz) - 4):
-        window = low_after_gz.iloc[i-4:i+5]
+    # Gunakan jendela 10 hari untuk mengabaikan riak kecil (5 hari sblm, 5 hari ssdh)
+    for i in range(5, len(low_after_gz) - 5):
+        window = low_after_gz.iloc[i-5:i+6]
         if low_after_gz.iloc[i] == window.min():
             swing_lows.append(low_after_gz.iloc[i])
             
     fase = 0
     last_sl = ground_zero_val
     for sl in swing_lows:
-        if sl > last_sl:
+        if sl > last_sl * 1.02: # Wajib lebih tinggi minimal 2% untuk dihitung Higher Low valid
             fase += 1
             last_sl = sl
         elif sl < last_sl:
             fase = 0
             last_sl = sl
-            
     return fase
 
 def analyze_stock(df_stock, ticker):
-    if df_stock is None or len(df_stock.dropna()) < 35:
-        return None
+    if df_stock is None or len(df_stock.dropna()) < 35: return None
         
     close = df_stock['Close'].dropna()
     high = df_stock['High'].dropna()
@@ -135,63 +137,62 @@ def analyze_stock(df_stock, ticker):
     
     common_idx = close.index.intersection(volume.index)
     close, high, low, volume = close[common_idx], high[common_idx], low[common_idx], volume[common_idx]
-    
-    if len(close) < 35:
-        return None
+    if len(close) < 35: return None
 
-    # 1. Likuiditas (Value 20 hari rata-rata)
-    value_daily = close * volume
-    val_ma20 = value_daily.rolling(20).mean().iloc[-1]
+    # -- TAHAP 0: LIKUIDITAS & DETAK JANTUNG --
+    val_ma20 = (close * volume).rolling(20).mean().iloc[-1]
     
-    # 2. Batas Fase & Cut Loss (Lowest Low 20 hari)
-    ll20 = low.shift(1).rolling(LL_PERIOD).min().iloc[-1]
+    hh20_series = high.shift(1).rolling(LL_PERIOD).max()
+    ll20_series = low.shift(1).rolling(LL_PERIOD).min()
+    hh20 = hh20_series.iloc[-1]
+    ll20 = ll20_series.iloc[-1]
     close_now = close.iloc[-1]
-    retrace_sehat = close_now >= ll20
     
-    # 3. No Supply (Volume Ratio)
+    heartbeat_range = (hh20 - ll20) / ll20 if ll20 > 0 else 0
+
+    # -- TAHAP 1: SETUP ABSORPTION --
     vma10 = volume.rolling(10).mean().iloc[-1]
     vma30 = volume.rolling(30).mean().iloc[-1]
     vol_ratio = vma10 / vma30 if vma30 > 0 else 999
     
-    # 4. Momentum (Stochastic)
+    struktur_aman = close_now >= ll20
+
+    # -- TAHAP 2: KERANJANG AKSI --
     stoch_k_series = calculate_stochastic(high, low, close)
     stoch_k = stoch_k_series.iloc[-1]
     
-    # 5. Penghitungan Fase
+    # Deteksi memori Breakout (Pernah nembus HH20 dalam 20 hari terakhir)
+    past_20_closes = close.iloc[-20:]
+    past_20_hh20s = hh20_series.iloc[-20:]
+    has_breakout_history = any(past_20_closes >= past_20_hh20s)
+    
+    # Pelatuk Eksekusi
+    is_breakout = close_now >= hh20
+    is_retrace = (close_now < hh20) and (stoch_k <= STOCH_OVERSOLD) and has_breakout_history
+
+    # Metrik Tambahan
     fase_aktif = hitung_fase_wyckoff(low)
-    
-    # 6. Kenaikan dari bottom 120 Hari
     bottom_120 = low.tail(LOOKBACK_PHASE).min()
-    pct_from_bottom_120 = ((close_now - bottom_120) / bottom_120) * 100
+    pct_from_bottom_120 = ((close_now - bottom_120) / bottom_120) * 100 if bottom_120 > 0 else 0
     
-    # Gap Sektoral (Return sejak bottom IHSG 8 Juni 2026)
     close_after_trough = close[close.index >= TROUGH_DATE]
-    if len(close_after_trough) > 0:
-        ret_from_trough = (close_now - close_after_trough.iloc[0]) / close_after_trough.iloc[0] * 100
-    else:
-        ret_from_trough = 0
+    ret_from_trough = ((close_now - close_after_trough.iloc[0]) / close_after_trough.iloc[0] * 100) if len(close_after_trough) > 0 else 0
 
     return {
-        "ticker": ticker,
-        "close": float(close_now),
-        "val_ma20": float(val_ma20),
-        "ll20": float(ll20),
-        "retrace_sehat": retrace_sehat,
-        "vol_ratio": float(vol_ratio),
-        "stoch_k": float(stoch_k),
-        "fase": fase_aktif,
-        "pct_from_bottom_120": float(pct_from_bottom_120),
-        "ret_from_trough": float(ret_from_trough),
-        "price_history": close.tail(45).tolist()
+        "ticker": ticker, "close": float(close_now), "val_ma20": float(val_ma20),
+        "hh20": float(hh20), "ll20": float(ll20), "heartbeat": float(heartbeat_range),
+        "struktur_aman": struktur_aman, "vol_ratio": float(vol_ratio), "stoch_k": float(stoch_k),
+        "has_breakout_history": has_breakout_history, "is_breakout": is_breakout, "is_retrace": is_retrace,
+        "fase": fase_aktif, "pct_from_bottom_120": float(pct_from_bottom_120),
+        "ret_from_trough": float(ret_from_trough), "price_history": close.tail(45).tolist()
     }
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_sectors_for_candidates(tickers):
+def fetch_sectors(tickers):
     sector_map = {}
     for t in tickers:
         try:
-            info = yf.Ticker(f"{t}.JK").info
-            sector_map[t] = info.get("sector", "Unmapped")
+            sector_map[t] = yf.Ticker(f"{t}.JK").info.get("sector", "Unmapped")
         except:
             sector_map[t] = "Unmapped"
     return sector_map
@@ -199,109 +200,129 @@ def fetch_sectors_for_candidates(tickers):
 # =====================================================================
 # ANTARMUKA APLIKASI
 # =====================================================================
-st.title("Compounding Screener")
-st.markdown("Peleburan strategi **No Supply (Wyckoff)**, disiplin **Turtle**, dan **Regime Sektoral**.")
+st.title("Compounding Screener 🎯")
+st.markdown("Sistem penyaringan *Swing Cycle* berbasis likuiditas, *Wyckoff Absorption*, dan disiplin *Turtle*.")
 
-# Sidebar Setup
-st.sidebar.markdown("### ⚙️ Universe Setup")
+st.sidebar.markdown("### ⚙️ Universe Input")
 universe_input = st.sidebar.text_area(
-    "Daftar Ticker:",
+    "Paste 800+ Ticker BEI di sini:",
     value="BBCA, BBRI, BMRI, BBNI, BRIS, AMMN, TPIA, BREN, BYAN, ASII, \nTLKM, UNTR, ICBP, MYOR, INCO, ANTM, PTBA, ADRO, TINS, HRTA, \nEMAS, SSMS, TOWR, AADI, CYBR, EPAC, MBSS, MUTU, GPRA, TBIG, REAL",
-    height=150
+    height=200
 )
 tickers_raw = [t.strip().upper() for t in universe_input.replace('\n', ',').split(',') if t.strip()]
 TICKERS = list(set(tickers_raw))
 
-st.sidebar.markdown(f"**Total Ticker:** {len(TICKERS)}")
-
-if st.button("🚀 Jalankan Screener"):
+if st.button("🚀 Pindai Pasar Sekarang"):
     if not TICKERS:
-        st.warning("Masukkan setidaknya 1 ticker.")
         st.stop()
         
-    with st.spinner(f"Menarik harga & volume {len(TICKERS)} saham..."):
+    with st.spinner(f"Mengunduh dan menganalisis {len(TICKERS)} saham..."):
         df_market = fetch_market_data(TICKERS)
-        
-    if df_market is None:
-        st.stop()
+    if df_market is None: st.stop()
 
-    candidates_raw = []
+    k_breakout, k_retrace = [], []
     
-    with st.spinner("Memproses Gerbang Keras & Pendeteksi Fase..."):
-        for t in TICKERS:
-            if isinstance(df_market.columns, pd.MultiIndex):
-                if f"{t}.JK" in df_market.columns.get_level_values(0):
-                    df_stock = df_market[f"{t}.JK"]
-                else: continue
-            else:
-                df_stock = df_market
-                
-            metrics = analyze_stock(df_stock, t)
-            if not metrics: continue
-                
-            if metrics["val_ma20"] < MIN_LIQUIDITY: continue
-            if not metrics["retrace_sehat"]: continue
-            if metrics["stoch_k"] >= STOCH_K_MAX: continue
-            if metrics["vol_ratio"] >= VOL_RATIO_MAX: continue
+    for t in TICKERS:
+        df_stock = df_market[f"{t}.JK"] if isinstance(df_market.columns, pd.MultiIndex) and f"{t}.JK" in df_market.columns.get_level_values(0) else df_market if not isinstance(df_market.columns, pd.MultiIndex) else None
+        if df_stock is None: continue
             
-            candidates_raw.append(metrics)
+        m = analyze_stock(df_stock, t)
+        if not m: continue
+            
+        # TAHAP 0: Filter Sampah
+        if m["val_ma20"] < MIN_LIQUIDITY: continue
+        if m["heartbeat"] < MIN_HEARTBEAT: continue
+        
+        # TAHAP 1: Syarat Absorption
+        if not m["struktur_aman"]: continue
+        if m["vol_ratio"] >= VOL_RATIO_MAX: continue
+        
+        # TAHAP 2: Sortir Keranjang
+        if m["is_breakout"]:
+            k_breakout.append(m)
+        elif m["is_retrace"]:
+            k_retrace.append(m)
 
-    if not candidates_raw:
-        st.info("Tidak ada saham yang lolos semua gerbang (Likuiditas, LL20, Stoch < 80, No Supply).")
+    if not k_breakout and not k_retrace:
+        st.warning("Tidak ada saham yang lolos filter hari ini.")
         st.stop()
 
-    with st.spinner("Menarik label sektor & menghitung Gap..."):
-        valid_tickers = [c["ticker"] for c in candidates_raw]
-        sector_map = fetch_sectors_for_candidates(valid_tickers)
-        
+    # Hitung Sektor & Gap
+    valid_tickers = [c["ticker"] for c in k_breakout + k_retrace]
+    with st.spinner("Memetakan Sektor..."):
+        sector_map = fetch_sectors(valid_tickers)
         sector_returns = {}
-        for c in candidates_raw:
+        for c in k_breakout + k_retrace:
             skt = sector_map[c["ticker"]]
             sector_returns.setdefault(skt, []).append(c["ret_from_trough"])
-            
         sector_avg_map = {skt: np.mean(rets) for skt, rets in sector_returns.items()}
         
-        for c in candidates_raw:
+        for c in k_breakout + k_retrace:
             skt = sector_map[c["ticker"]]
             c["sektor"] = skt
-            c["sector_avg"] = sector_avg_map[skt]
-            c["gap_sektoral"] = c["ret_from_trough"] - c["sector_avg"]
+            c["gap_sektoral"] = c["ret_from_trough"] - sector_avg_map[skt]
 
-    candidates_raw.sort(key=lambda x: (x["fase"], x["vol_ratio"]))
+    # URUTKAN & TAMPILKAN
+    k_breakout.sort(key=lambda x: x["vol_ratio"])
+    k_retrace.sort(key=lambda x: x["stoch_k"])
 
-    st.subheader(f"🎯 {len(candidates_raw)} Kandidat Compounding")
-    st.caption("Sizing: 30% di awal, +70% jika retrace tetap di atas LL20 dan Oversold (Stochastic < 80).")
-    
-    for c in candidates_raw:
-        gap_color = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
-        stoch_color = "var(--green)" if c["stoch_k"] < 30 else "var(--text)"
-        
-        fase_label = "Awal (Fresh)" if c["fase"] <= 1 else ("Lanjutan" if c["fase"] == 2 else "RAWAN (Bahaya)")
-        badge_fase_class = "badge-fase-aman" if c["fase"] <= 2 else "badge-fase-bahaya"
-        
+    st.divider()
+
+    # --- KERANJANG 1 ---
+    st.subheader(f"🛒 Keranjang 1: Fase Breakout ({len(k_breakout)} Saham)")
+    st.caption("Aksi: Entry awal 30%. Syarat: Terbukti ada jejak No Supply dan hari ini menembus Highest High 20 (HH20).")
+    for c in k_breakout:
         fig = go.Figure(go.Scatter(y=c["price_history"], mode='lines', line=dict(color='#B8823D', width=2)))
-        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150,
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                          xaxis=dict(visible=False), yaxis=dict(visible=False))
-
+        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(visible=False), yaxis=dict(visible=False))
+        gap_col = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
+        
         st.markdown(f"""
-        <div class="compounding-card">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="card-breakout">
+            <div style="display: flex; justify-content: space-between;">
                 <div>
-                    <span class="compounding-title">{c['ticker']}</span>
+                    <span class="stock-title">{c['ticker']}</span>
                     <span class="badge badge-sektor">{c['sektor']}</span>
-                    <span class="badge {badge_fase_class}">Fase {c['fase']} : {fase_label}</span>
+                    <span class="badge badge-fase">Fase Kenaikan: {c['fase']}</span>
                 </div>
             </div>
             <div class="metric-row">
-                <div class="metric-item">Vol Ratio: <span class="metric-val" style="color:var(--green)">{c['vol_ratio']:.2f}x</span></div>
-                <div class="metric-item">Stochastic K: <span class="metric-val" style="color:{stoch_color}">{c['stoch_k']:.1f}</span></div>
+                <div class="metric-item">Harga Tembus: <span class="metric-val" style="color:var(--green)">{c['close']:,.0f}</span> (HH20: {c['hh20']:,.0f})</div>
+                <div class="metric-item">Vol Ratio (No Supply): <span class="metric-val">{c['vol_ratio']:.2f}x</span></div>
                 <div class="metric-item">Value 20H: <span class="metric-val">Rp {c['val_ma20']/1e9:.1f} Miliar</span></div>
-                <div class="metric-item">Batas SL (LL20): <span class="metric-val" style="color:var(--red)">{c['ll20']:,.0f}</span></div>
-                <div class="metric-item">Dari Dasar 120H: <span class="metric-val" style="color:var(--green)">+{c['pct_from_bottom_120']:.1f}%</span></div>
-                <div class="metric-item">Gap Sektor: <span class="metric-val" style="color:{gap_color}">{c['gap_sektoral']:+.1f}%</span></div>
+                <div class="metric-item">Cut Loss Area (LL20): <span class="metric-val" style="color:var(--red)">{c['ll20']:,.0f}</span></div>
+                <div class="metric-item">Kenaikan 120H: <span class="metric-val">+{c['pct_from_bottom_120']:.1f}%</span></div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
         st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
+
+    # --- KERANJANG 2 ---
+    st.subheader(f"🛒 Keranjang 2: Retrace & Compounding ({len(k_retrace)} Saham)")
+    st.caption("Aksi: Entry 70% atau Gulung Profit 100%. Syarat: Pernah Breakout, harga tertahan di atas LL20, dan Stochastic Oversold.")
+    for c in k_retrace:
+        fig = go.Figure(go.Scatter(y=c["price_history"], mode='lines', line=dict(color='#5C8BC6', width=2)))
+        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=50, width=150, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(visible=False), yaxis=dict(visible=False))
+        gap_col = "var(--red)" if c["gap_sektoral"] < 0 else "var(--green)"
+        
+        st.markdown(f"""
+        <div class="card-retrace">
+            <div style="display: flex; justify-content: space-between;">
+                <div>
+                    <span class="stock-title">{c['ticker']}</span>
+                    <span class="badge badge-sektor">{c['sektor']}</span>
+                    <span class="badge badge-fase" style="color:var(--accent-2); border-color:rgba(92,139,198,0.3); background:rgba(92,139,198,0.15)">Fase Kenaikan: {c['fase']}</span>
+                </div>
+            </div>
+            <div class="metric-row">
+                <div class="metric-item">Stochastic K: <span class="metric-val" style="color:var(--green)">{c['stoch_k']:.1f} (Oversold)</span></div>
+                <div class="metric-item">Harga Tahan: <span class="metric-val">{c['close']:,.0f}</span> (Batas Bawah LL20: <span class="metric-val" style="color:var(--red)">{c['ll20']:,.0f}</span>)</div>
+                <div class="metric-item">Vol Ratio (No Supply): <span class="metric-val">{c['vol_ratio']:.2f}x</span></div>
+                <div class="metric-item">Value 20H: <span class="metric-val">Rp {c['val_ma20']/1e9:.1f} Miliar</span></div>
+                <div class="metric-item">Kenaikan 120H: <span class="metric-val">+{c['pct_from_bottom_120']:.1f}%</span></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
+
+    # --- ATURAN EXIT ---
+    st.info("**SOP KEDISIPLINAN (Manual):** Jual Profit 100% jika Stochastic K > 80 selama 2 hari beruntun. Cut Loss seketika jika harga turun 1 tick di bawah Batas Bawah LL20.")
