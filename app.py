@@ -455,7 +455,7 @@ def idx_pengumuman(kode):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def rss_berita(kode):
-    q = (f'{kode} saham (buyback OR "rights issue" OR "private placement" OR OJK OR suspensi OR "tender offer")'
+    q = (f'"{kode}" (buyback OR "rights issue" OR "private placement" OR OJK OR suspensi OR "tender offer")'
          " when:30d")
     url = "https://news.google.com/rss/search"
     try:
@@ -481,14 +481,18 @@ def cek_berita(kode):
         item = rss_berita(kode)
         sumber = "RSS"
     if item is None:
-        return "GAGAL", []
-    hasil = []
+        return "GAGAL", [], 0
+    hasil, dibuang = [], 0
+    pola_kode = re.compile(rf"\b{re.escape(kode)}\b", re.IGNORECASE)
     for b in item:
         f = flag_teks(b["judul"])
-        if f:
-            b = dict(b, tanda=", ".join(f), sebut_kode=kode.lower() in b["judul"].lower())
-            hasil.append(b)
-    return sumber, hasil
+        if not f:
+            continue
+        if sumber == "RSS" and not pola_kode.search(b["judul"]):
+            dibuang += 1          # judul tidak menyebut kode saham -> berita pasar umum, dibuang
+            continue
+        hasil.append(dict(b, tanda=", ".join(f)))
+    return sumber, hasil, dibuang
 
 
 # =============================================================================
@@ -789,15 +793,17 @@ with tabs[1]:
             pilih = st.multiselect("Kandidat yang dicek", list(kand["Kode"]), default=list(kand["Kode"])[:10])
             if st.button("Cek berita kandidat"):
                 for k in pilih:
-                    sumber, hasil = cek_berita(k)
+                    sumber, hasil, dibuang = cek_berita(k)
+                    ket = f" · {dibuang} judul umum dibuang" if dibuang else ""
                     if sumber == "GAGAL":
                         st.markdown(f"**{k}** · sumber berita gagal diakses")
                     elif not hasil:
-                        st.markdown(f"**{k}** · {sumber}: tidak ada judul bertanda")
+                        st.markdown(f"**{k}** · {sumber}: ✅ tidak ada judul bertanda yang menyebut {k}{ket}")
                     else:
-                        st.markdown(f"**{k}** · {sumber}: ⚠️ {len(hasil)} judul bertanda")
-                        st.dataframe(pd.DataFrame(hasil)[["tanggal", "tanda", "sebut_kode", "judul", "link"]],
-                                     hide_index=True, width="stretch")
+                        st.markdown(f"**{k}** · {sumber}: ⚠️ {len(hasil)} judul menyebut {k}{ket}")
+                        st.dataframe(pd.DataFrame(hasil)[["tanggal", "tanda", "judul", "link"]],
+                                     hide_index=True, width="stretch",
+                                     column_config={"link": st.column_config.LinkColumn("link", display_text="buka")})
             if st.button("Ambil net asing harian dari BEI"):
                 ok = None
                 for mundur in range(0, 6):
